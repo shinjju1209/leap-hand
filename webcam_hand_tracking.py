@@ -12,6 +12,9 @@ import mediapipe as mp
 from deadband_filter import AngleDeadband
 from hand_angles import DISPLAY_NAMES, calculate_leap_control_angles
 from one_euro_filter import OneEuroFilter
+from rps_gesture import GestureClassification, GestureStabilizer, classify_rps_gesture
+from rps_moves import MOVE_NAMES
+from rps_rounds import CsvRoundRecorder, RpsRoundSession
 
 
 HAND_CONNECTIONS = (
@@ -75,6 +78,53 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Mirror the webcam image like a selfie camera",
+    )
+    parser.add_argument(
+        "--gesture-stable-frames",
+        type=int,
+        default=4,
+        help="Consecutive matching frames required to confirm an RPS gesture",
+    )
+    parser.add_argument(
+        "--gesture-extended-max",
+        type=float,
+        default=55.0,
+        help="Largest PIP+DIP bend classified as an extended finger (degrees)",
+    )
+    parser.add_argument(
+        "--gesture-curled-min",
+        type=float,
+        default=100.0,
+        help="Smallest PIP+DIP bend classified as a curled finger (degrees)",
+    )
+    parser.add_argument(
+        "--gesture-thumb-extended-max",
+        type=float,
+        default=70.0,
+        help="Largest thumb bend accepted for the index+thumb scissors pose",
+    )
+    parser.add_argument(
+        "--gesture-thumb-extended-min-span",
+        type=float,
+        default=0.75,
+        help="Minimum thumb-tip span for the index+thumb scissors pose",
+    )
+    parser.add_argument(
+        "--gesture-thumb-curled-max-span",
+        type=float,
+        default=0.55,
+        help="Maximum thumb-tip span classified as a folded thumb",
+    )
+    parser.add_argument(
+        "--robot-move",
+        choices=MOVE_NAMES,
+        help="Known robot move for the first round; keys 1/2/3 start later rounds",
+    )
+    parser.add_argument(
+        "--results-csv",
+        type=Path,
+        default=Path("rps_results.csv"),
+        help="CSV file used to append completed round results",
     )
     return parser.parse_args()
 
@@ -196,10 +246,117 @@ def draw_angle_panel(
         )
 
 
+def draw_gesture_status(
+    frame,
+    classification: GestureClassification,
+    stable_label: str | None,
+    panel_index: int,
+) -> None:
+    """Show the one-frame candidate and temporally stable RPS result."""
+    candidate = classification.label.upper() if classification.label else "UNKNOWN"
+    confirmed = stable_label.upper() if stable_label else "HOLD STEADY"
+    color = (50, 230, 80) if stable_label else (0, 210, 255)
+    y = 105 + panel_index * 42
+    cv2.putText(
+        frame,
+        f"RPS: {confirmed} | candidate {candidate}",
+        (18, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+    state_text = "  ".join(
+        f"{name}:{state[0].upper()} {bend:.0f}"
+        for name, state, bend in zip(
+            ("T", "I", "M", "R", "P"),
+            classification.finger_states,
+            classification.bend_degrees,
+        )
+    )
+    state_text += f"  Tspan:{classification.thumb_span_ratio:.2f}"
+    cv2.putText(
+        frame,
+        state_text,
+        (18, y + 23),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (235, 235, 235),
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def draw_round_status(frame, session: RpsRoundSession) -> None:
+    """Draw the known robot move, last result, and cumulative score."""
+    robot_move = (
+        session.pending_robot_move.upper()
+        if session.pending_robot_move
+        else "PRESS 1/2/3"
+    )
+    cv2.putText(
+        frame,
+        f"Robot move: {robot_move}  [1 rock, 2 paper, 3 scissors]",
+        (18, 165),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 210, 80),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        (
+            f"Score: human {session.human_wins} | robot {session.robot_wins} "
+            f"| ties {session.ties}"
+        ),
+        (18, 192),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (235, 235, 235),
+        1,
+        cv2.LINE_AA,
+    )
+    if session.last_record is not None:
+        record = session.last_record
+        cv2.putText(
+            frame,
+            (
+                f"Round {record.round_number}: human {record.human_move.upper()} "
+                f"vs robot {record.robot_move.upper()} = {record.human_result.upper()}"
+            ),
+            (18, 219),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (80, 230, 100) if record.human_result == "win" else (80, 190, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+
 def main() -> None:
     args = parse_args()
     if args.deadband < 0.0:
         raise ValueError("--deadband must be zero or greater")
+    if args.gesture_stable_frames < 1:
+        raise ValueError("--gesture-stable-frames must be at least one")
+    if args.gesture_extended_max < 0.0:
+        raise ValueError("--gesture-extended-max must be zero or greater")
+    if args.gesture_curled_min <= args.gesture_extended_max:
+        raise ValueError("--gesture-curled-min must exceed --gesture-extended-max")
+    if args.gesture_thumb_extended_max < 0.0:
+        raise ValueError("--gesture-thumb-extended-max must be zero or greater")
+    if args.gesture_thumb_curled_max_span < 0.0:
+        raise ValueError("--gesture-thumb-curled-max-span must be zero or greater")
+    if (
+        args.gesture_thumb_extended_min_span
+        <= args.gesture_thumb_curled_max_span
+    ):
+        raise ValueError(
+            "--gesture-thumb-extended-min-span must exceed "
+            "--gesture-thumb-curled-max-span"
+        )
 
     processing_steps = []
     if args.filter:
@@ -231,6 +388,10 @@ def main() -> None:
     last_timestamp_ms = -1
     angle_filters: dict[str, OneEuroFilter] = {}
     angle_deadbands: dict[str, AngleDeadband] = {}
+    gesture_stabilizers: dict[str, GestureStabilizer] = {}
+    round_session = RpsRoundSession(CsvRoundRecorder(args.results_csv))
+    if args.robot_move:
+        round_session.start_round(args.robot_move)
     last_hand_seen_seconds: float | None = None
 
     try:
@@ -260,6 +421,7 @@ def main() -> None:
                 ):
                     angle_filters.clear()
                     angle_deadbands.clear()
+                    gesture_stabilizers.clear()
                     last_hand_seen_seconds = None
 
                 if args.mirror:
@@ -278,6 +440,50 @@ def main() -> None:
                         if index < len(result.hand_world_landmarks)
                         else landmarks
                     )
+                    hand_label = (
+                        handedness[0].category_name
+                        if handedness and handedness[0].category_name
+                        else "Hand"
+                    )
+                    filter_key = hand_label
+                    gesture_stabilizer = gesture_stabilizers.get(filter_key)
+                    if gesture_stabilizer is None:
+                        gesture_stabilizer = GestureStabilizer(
+                            args.gesture_stable_frames
+                        )
+                        gesture_stabilizers[filter_key] = gesture_stabilizer
+                    try:
+                        gesture = classify_rps_gesture(
+                            world_landmarks,
+                            extended_max_degrees=args.gesture_extended_max,
+                            curled_min_degrees=args.gesture_curled_min,
+                            thumb_extended_max_degrees=(
+                                args.gesture_thumb_extended_max
+                            ),
+                            thumb_extended_min_span=(
+                                args.gesture_thumb_extended_min_span
+                            ),
+                            thumb_curled_max_span=(
+                                args.gesture_thumb_curled_max_span
+                            ),
+                        )
+                    except ValueError:
+                        gesture_stabilizer.reset()
+                    else:
+                        stable_gesture = gesture_stabilizer.update(gesture.label)
+                        draw_gesture_status(frame, gesture, stable_gesture, index)
+                        completed_round = (
+                            round_session.observe_confirmed_human_move(stable_gesture)
+                        )
+                        if completed_round is not None:
+                            print(
+                                f"Round {completed_round.round_number}: human "
+                                f"{completed_round.human_move} vs robot "
+                                f"{completed_round.robot_move} -> human "
+                                f"{completed_round.human_result}",
+                                flush=True,
+                            )
+
                     try:
                         angles = calculate_leap_control_angles(world_landmarks)
                     except ValueError as error:
@@ -292,12 +498,6 @@ def main() -> None:
                             cv2.LINE_AA,
                         )
                     else:
-                        hand_label = (
-                            handedness[0].category_name
-                            if handedness and handedness[0].category_name
-                            else "Hand"
-                        )
-                        filter_key = hand_label
                         if args.filter:
                             angle_filter = angle_filters.get(filter_key)
                             if angle_filter is None:
@@ -367,11 +567,21 @@ def main() -> None:
                     1,
                     cv2.LINE_AA,
                 )
+                draw_round_status(frame, round_session)
 
                 cv2.imshow(window_name, frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q"), 27):
                     break
+                robot_move_keys = {
+                    ord("1"): "rock",
+                    ord("2"): "paper",
+                    ord("3"): "scissors",
+                }
+                if key in robot_move_keys:
+                    robot_move = robot_move_keys[key]
+                    round_session.start_round(robot_move)
+                    print(f"Robot move set to {robot_move}; waiting for human.", flush=True)
     finally:
         capture.release()
         cv2.destroyAllWindows()
