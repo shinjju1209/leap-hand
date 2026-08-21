@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from hand_angles import ANGLE_NAMES
-from rps_moves import MOVE_NAMES
+from .moves import MOVE_NAMES
 
 
 def make_posture(changes: Mapping[str, float]) -> np.ndarray:

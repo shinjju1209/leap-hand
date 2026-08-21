@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rps_moves import MOVE_NAMES
+from .moves import MOVE_NAMES
 
 
 BEATS = {

@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib import import_module
 from math import ceil, pi
-from typing import Any, Sequence
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from hand_angles import ANGLE_NAMES
+from hardware_calibration import HardwareMotorCalibration
 
 
 PROTOCOL_VERSION = 2.0
 DEFAULT_BAUDRATE = 4_000_000
 DEFAULT_MOTOR_IDS = tuple(range(16))
-SIDE_MOTOR_IDS = (0, 4, 8)
 
 # XC330 / DYNAMIXEL X-series control table addresses used by LEAP Hand v1.
 ADDR_OPERATING_MODE = 11
@@ -37,7 +40,8 @@ CURRENT_BASED_POSITION_MODE = 5
 POSITION_SCALE_RADIANS = 2.0 * pi / 4096.0
 VELOCITY_SCALE_RADIANS_PER_SECOND = 0.229 * 2.0 * pi / 60.0
 
-# Official LEAPsim safety bounds. The real motor convention adds pi radians.
+# Official LEAPsim safety bounds. Nominal hardware alignment uses a pi-radian
+# open pose; a saved HardwareMotorCalibration can override it per motor.
 SIM_MIN_RADIANS = np.asarray(
     [
         -1.047, -0.314, -0.506, -0.366,
@@ -115,20 +119,40 @@ class LeapHandHardwareController:
         port: str,
         *,
         baudrate: int = DEFAULT_BAUDRATE,
-        motor_ids: Sequence[int] = DEFAULT_MOTOR_IDS,
+        motor_ids: Sequence[int] | None = None,
         current_limit_milliamps: int = 300,
         position_p_gain: int = 600,
         position_i_gain: int = 0,
         position_d_gain: int = 200,
         side_gain_scale: float = 0.75,
         bus_watchdog_milliseconds: int = 500,
+        max_joint_speed_degrees_per_second: float = 120.0,
+        max_command_interval_seconds: float = 0.1,
+        motor_calibration: HardwareMotorCalibration | str | Path | None = None,
         sdk_module: Any | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         if not port.strip():
             raise ValueError("port must not be empty")
         if baudrate <= 0:
             raise ValueError("baudrate must be positive")
-        ids = tuple(int(motor_id) for motor_id in motor_ids)
+        if motor_calibration is None:
+            ids = tuple(
+                int(motor_id)
+                for motor_id in (DEFAULT_MOTOR_IDS if motor_ids is None else motor_ids)
+            )
+            calibration = HardwareMotorCalibration.nominal(ids)
+        else:
+            calibration = (
+                HardwareMotorCalibration.load(motor_calibration)
+                if isinstance(motor_calibration, (str, Path))
+                else motor_calibration
+            )
+            if not isinstance(calibration, HardwareMotorCalibration):
+                raise TypeError("motor_calibration must be a path or HardwareMotorCalibration")
+            ids = calibration.motor_ids
+            if motor_ids is not None and tuple(int(motor_id) for motor_id in motor_ids) != ids:
+                raise ValueError("motor_ids conflicts with the motor calibration file")
         if len(ids) != 16 or len(set(ids)) != 16:
             raise ValueError("motor_ids must contain 16 unique IDs")
         if not 1 <= current_limit_milliamps <= 550:
@@ -139,16 +163,35 @@ class LeapHandHardwareController:
             raise ValueError("side_gain_scale must be in the interval (0, 1]")
         if not 20 <= bus_watchdog_milliseconds <= 2540:
             raise ValueError("bus watchdog must be between 20 and 2540 ms")
+        if (
+            not np.isfinite(max_joint_speed_degrees_per_second)
+            or max_joint_speed_degrees_per_second <= 0.0
+        ):
+            raise ValueError("max joint speed must be finite and greater than zero")
+        if (
+            not np.isfinite(max_command_interval_seconds)
+            or max_command_interval_seconds <= 0.0
+        ):
+            raise ValueError(
+                "max command interval must be finite and greater than zero"
+            )
 
         self.port = port.strip()
         self.baudrate = int(baudrate)
         self.motor_ids = ids
+        self.motor_calibration = calibration
+        self._side_motor_ids = {self.motor_ids[index] for index in (0, 4, 8)}
         self.current_limit_milliamps = int(current_limit_milliamps)
         self.position_p_gain = int(position_p_gain)
         self.position_i_gain = int(position_i_gain)
         self.position_d_gain = int(position_d_gain)
         self.side_gain_scale = float(side_gain_scale)
         self.bus_watchdog_milliseconds = int(bus_watchdog_milliseconds)
+        self.max_joint_speed_degrees_per_second = float(
+            max_joint_speed_degrees_per_second
+        )
+        self.max_command_interval_seconds = float(max_command_interval_seconds)
+        self._clock = clock or time.monotonic
 
         self._sdk = sdk_module
         self._port_handler = None
@@ -161,6 +204,7 @@ class LeapHandHardwareController:
         self._model_numbers: dict[int, int] = {}
         self._last_command_degrees = np.zeros(16, dtype=np.float64)
         self._last_goal_motor_radians: np.ndarray | None = None
+        self._last_command_time_seconds: float | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -246,7 +290,7 @@ class LeapHandHardwareController:
             self._write_register(motor_id, ADDR_OPERATING_MODE, 1, CURRENT_BASED_POSITION_MODE)
             p_gain = self.position_p_gain
             d_gain = self.position_d_gain
-            if motor_id in SIDE_MOTOR_IDS:
+            if motor_id in self._side_motor_ids:
                 p_gain = round(p_gain * self.side_gain_scale)
                 d_gain = round(d_gain * self.side_gain_scale)
             self._write_register(motor_id, ADDR_POSITION_P_GAIN, 2, p_gain)
@@ -283,20 +327,45 @@ class LeapHandHardwareController:
             self.emergency_stop()
             raise
         self._torque_enabled = True
-        present_sim = motor_radians_to_sim_radians(present_motor_radians)
+        present_sim = self.motor_calibration.motor_to_sim_radians(
+            present_motor_radians
+        )
         self._last_command_degrees = np.rad2deg(present_sim)
+        self._last_command_time_seconds = float(self._clock())
 
     def command_degrees(self, angles_degrees: Sequence[float]) -> np.ndarray:
-        """Clip and command 16 zero-open angles in ``ANGLE_NAMES`` order."""
+        """Clip and slew-limit 16 zero-open angles in ``ANGLE_NAMES`` order."""
         self._require_connected()
         if not self._torque_enabled:
             raise RuntimeError("Torque is disabled; call enable_torque() explicitly")
         requested_radians = np.deg2rad(_vector16(angles_degrees, "angles_degrees"))
-        safe_sim_radians = clip_sim_radians(requested_radians)
-        motor_radians = safe_sim_radians + pi
+        target_degrees = np.rad2deg(clip_sim_radians(requested_radians))
+
+        now_seconds = float(self._clock())
+        if not np.isfinite(now_seconds):
+            raise RuntimeError("monotonic clock returned a non-finite value")
+        if self._last_command_time_seconds is None:
+            raise RuntimeError("Command timing was not initialized by enable_torque()")
+        elapsed_seconds = max(0.0, now_seconds - self._last_command_time_seconds)
+        limited_interval = min(elapsed_seconds, self.max_command_interval_seconds)
+        max_change_degrees = (
+            self.max_joint_speed_degrees_per_second * limited_interval
+        )
+        safe_command_degrees = np.clip(
+            target_degrees,
+            self._last_command_degrees - max_change_degrees,
+            self._last_command_degrees + max_change_degrees,
+        )
+
+        # The seeded present position can be just outside the nominal model bounds.
+        # Move it toward the clipped target at the speed limit instead of snapping it.
+        motor_radians = self.motor_calibration.sim_to_motor_radians(
+            np.deg2rad(safe_command_degrees)
+        )
         self._sync_write_motor_radians(motor_radians)
         self._last_goal_motor_radians = motor_radians.copy()
-        self._last_command_degrees = np.rad2deg(safe_sim_radians)
+        self._last_command_degrees = safe_command_degrees
+        self._last_command_time_seconds = now_seconds
         return self.last_command_degrees
 
     def heartbeat(self) -> None:
@@ -351,7 +420,7 @@ class LeapHandHardwareController:
 
         return LeapHandFeedback(
             positions_degrees=np.rad2deg(
-                motor_radians_to_sim_radians(motor_positions)
+                self.motor_calibration.motor_to_sim_radians(motor_positions)
             ),
             velocities_degrees_per_second=np.rad2deg(velocities),
             currents_milliamps=currents,
@@ -402,6 +471,7 @@ class LeapHandHardwareController:
         self._feedback_reader = None
         self._goal_writer = None
         self._last_goal_motor_radians = None
+        self._last_command_time_seconds = None
         return failed_ids
 
     def _read_present_motor_radians(self) -> np.ndarray:
@@ -415,6 +485,11 @@ class LeapHandHardwareController:
             )
             values[index] = raw_position * POSITION_SCALE_RADIANS
         return values
+
+    def read_motor_positions_radians(self) -> np.ndarray:
+        """Read raw DYNAMIXEL positions without applying any calibration."""
+        self._require_connected()
+        return self._read_present_motor_radians().copy()
 
     def _sync_write_motor_radians(self, motor_radians: Sequence[float]) -> None:
         values = _vector16(motor_radians, "motor_radians")
@@ -531,6 +606,7 @@ class LeapHandHardwareController:
 __all__ = [
     "ANGLE_NAMES",
     "DEFAULT_MOTOR_IDS",
+    "HardwareMotorCalibration",
     "LeapHandFeedback",
     "LeapHandHardwareController",
     "LeapHandHealth",

@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from hand_angles import ANGLE_NAMES
-from rps_postures import MOVE_NAMES, RPS_POSTURES, get_posture, make_posture
+from rps.postures import MOVE_NAMES, RPS_POSTURES, get_posture, make_posture
 
 
 class RpsPostureTests(unittest.TestCase):

@@ -19,6 +19,7 @@ from leap_hand_hardware_controller import (
     motor_radians_to_sim_radians,
     sim_radians_to_motor_radians,
 )
+from hardware_calibration import HardwareMotorCalibration
 
 
 class FakePortHandler:
@@ -141,12 +142,25 @@ class FakeDynamixelSdk:
         return FakeGroupSyncRead(self)
 
 
+class FakeClock:
+    def __init__(self):
+        self.value = 100.0
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
 class LeapHandHardwareControllerTests(unittest.TestCase):
     def setUp(self):
         self.sdk = FakeDynamixelSdk()
+        self.clock = FakeClock()
         self.controller = LeapHandHardwareController(
             "COM_TEST",
             sdk_module=self.sdk,
+            clock=self.clock,
         )
 
     def tearDown(self):
@@ -216,8 +230,84 @@ class LeapHandHardwareControllerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.controller.command_degrees(np.zeros(16))
         self.controller.enable_torque()
+        self.clock.advance(0.1)
         actual = self.controller.command_degrees(np.full(16, 30.0))
-        np.testing.assert_allclose(actual, np.full(16, 30.0))
+        np.testing.assert_allclose(actual, np.full(16, 12.0))
+
+    def test_saved_open_pose_calibration_is_used_for_goals_and_feedback(self):
+        open_positions = np.linspace(np.pi - 0.1, np.pi + 0.1, 16)
+        signs = np.ones(16)
+        signs[2] = -1.0
+        calibration = HardwareMotorCalibration(
+            tuple(range(16)),
+            open_positions,
+            signs,
+        )
+        controller = LeapHandHardwareController(
+            "COM_TEST",
+            sdk_module=self.sdk,
+            clock=self.clock,
+            max_joint_speed_degrees_per_second=10_000.0,
+            motor_calibration=calibration,
+        )
+        try:
+            controller.connect()
+            feedback = controller.read_feedback()
+            np.testing.assert_allclose(
+                feedback.positions_degrees,
+                np.rad2deg((np.pi - open_positions) * signs),
+            )
+            controller.configure()
+            controller.enable_torque()
+            self.clock.advance(0.1)
+            actual = controller.command_degrees(np.zeros(16))
+            np.testing.assert_allclose(actual, np.zeros(16))
+            for motor_id, expected_radians in zip(
+                controller.motor_ids,
+                open_positions,
+            ):
+                self.assertEqual(
+                    self.sdk.registers[(motor_id, ADDR_GOAL_POSITION)],
+                    round(expected_radians / POSITION_SCALE_RADIANS),
+                )
+        finally:
+            controller.close()
+
+    def test_command_speed_is_limited_by_elapsed_time(self):
+        self.controller.connect()
+        self.controller.configure()
+        self.controller.enable_torque()
+
+        self.clock.advance(0.025)
+        first = self.controller.command_degrees(np.full(16, 30.0))
+        np.testing.assert_allclose(first, np.full(16, 3.0))
+
+        self.clock.advance(0.05)
+        second = self.controller.command_degrees(np.full(16, 30.0))
+        np.testing.assert_allclose(second, np.full(16, 9.0))
+
+    def test_long_command_pause_does_not_allow_a_large_jump(self):
+        self.controller.connect()
+        self.controller.configure()
+        self.controller.enable_torque()
+
+        self.clock.advance(5.0)
+        actual = self.controller.command_degrees(np.full(16, 90.0))
+        np.testing.assert_allclose(actual, np.full(16, 12.0))
+
+    def test_speed_limit_arguments_are_validated(self):
+        with self.assertRaises(ValueError):
+            LeapHandHardwareController(
+                "COM_TEST",
+                max_joint_speed_degrees_per_second=0.0,
+                sdk_module=self.sdk,
+            )
+        with self.assertRaises(ValueError):
+            LeapHandHardwareController(
+                "COM_TEST",
+                max_command_interval_seconds=0.0,
+                sdk_module=self.sdk,
+            )
 
     def test_heartbeat_reuses_exact_seeded_raw_goal(self):
         outside_safe_range_raw = round((np.pi - 1.5) / POSITION_SCALE_RADIANS)

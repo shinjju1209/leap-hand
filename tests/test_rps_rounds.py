@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rps_rounds import CsvRoundRecorder, RpsRoundSession, human_result
+from rps.rounds import CsvRoundRecorder, RpsRoundSession, human_result
 
 
 class RpsRoundTests(unittest.TestCase):

@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from rps_gesture import GestureStabilizer, classify_rps_gesture
+from rps.gesture import GestureStabilizer, classify_rps_gesture
 
 
 class Landmark:

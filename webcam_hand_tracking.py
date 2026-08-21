@@ -17,9 +17,9 @@ from neutral_calibration import (
     NeutralCalibration,
 )
 from one_euro_filter import OneEuroFilter
-from rps_gesture import GestureClassification, GestureStabilizer, classify_rps_gesture
-from rps_moves import MOVE_NAMES
-from rps_rounds import CsvRoundRecorder, RpsRoundSession
+from rps.gesture import GestureClassification, GestureStabilizer, classify_rps_gesture
+from rps.moves import MOVE_NAMES
+from rps.rounds import CsvRoundRecorder, RpsRoundSession
 
 
 HAND_CONNECTIONS = (

@@ -8,7 +8,7 @@ import numpy as np
 
 from mujoco_finger_test import _advance_realtime, _hold_pose
 from mujoco_hand_controller import MujocoHandController
-from rps_postures import MOVE_NAMES, get_posture
+from .postures import MOVE_NAMES, get_posture
 
 
 def parse_args() -> argparse.Namespace:

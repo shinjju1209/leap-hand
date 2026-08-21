@@ -1,0 +1,22 @@
+version: 1
+description: >
+  Template for LEAP Hand v1 per-motor open-pose calibration.
+  Run leap_hand_motor_calibration.py to create calibration/hardware_motors.yaml
+  from a physical open-hand pose. Confirm every sign with leap_hand_joint_test.py.
+joints:
+  index_mcp_side:   {motor_id: 0,  open_motor_radians: 3.141592654, sign: 1}
+  index_mcp_flex:   {motor_id: 1,  open_motor_radians: 3.141592654, sign: 1}
+  index_pip_flex:   {motor_id: 2,  open_motor_radians: 3.141592654, sign: 1}
+  index_dip_flex:   {motor_id: 3,  open_motor_radians: 3.141592654, sign: 1}
+  middle_mcp_side:  {motor_id: 4,  open_motor_radians: 3.141592654, sign: 1}
+  middle_mcp_flex:  {motor_id: 5,  open_motor_radians: 3.141592654, sign: 1}
+  middle_pip_flex:  {motor_id: 6,  open_motor_radians: 3.141592654, sign: 1}
+  middle_dip_flex:  {motor_id: 7,  open_motor_radians: 3.141592654, sign: 1}
+  ring_mcp_side:    {motor_id: 8,  open_motor_radians: 3.141592654, sign: 1}
+  ring_mcp_flex:    {motor_id: 9,  open_motor_radians: 3.141592654, sign: 1}
+  ring_pip_flex:    {motor_id: 10, open_motor_radians: 3.141592654, sign: 1}
+  ring_dip_flex:    {motor_id: 11, open_motor_radians: 3.141592654, sign: 1}
+  thumb_cmc_side:   {motor_id: 12, open_motor_radians: 3.141592654, sign: 1}
+  thumb_cmc_flex:   {motor_id: 13, open_motor_radians: 3.141592654, sign: 1}
+  thumb_mcp_flex:   {motor_id: 14, open_motor_radians: 3.141592654, sign: 1}
+  thumb_ip_flex:    {motor_id: 15, open_motor_radians: 3.141592654, sign: 1}

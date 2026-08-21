@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -27,6 +28,23 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=500,
         help="DYNAMIXEL bus watchdog timeout",
+    )
+    parser.add_argument(
+        "--max-joint-speed",
+        type=float,
+        default=120.0,
+        help="Maximum commanded speed for every joint in degrees per second",
+    )
+    parser.add_argument(
+        "--max-command-interval",
+        type=float,
+        default=0.1,
+        help="Largest elapsed time used by the command slew limiter",
+    )
+    parser.add_argument(
+        "--motor-calibration-file",
+        type=Path,
+        help="Optional YAML created by leap_hand_motor_calibration.py",
     )
     parser.add_argument(
         "--torque-test",
@@ -56,6 +74,9 @@ def main() -> None:
         baudrate=args.baudrate,
         current_limit_milliamps=args.current_limit,
         bus_watchdog_milliseconds=args.watchdog_ms,
+        max_joint_speed_degrees_per_second=args.max_joint_speed,
+        max_command_interval_seconds=args.max_command_interval,
+        motor_calibration=args.motor_calibration_file,
     )
     shutdown_failures: tuple[int, ...] = ()
     try:

@@ -43,7 +43,7 @@ python mujoco_finger_test.py
 rock, paper, scissors 자세를 차례로 확인하는 선택적 MuJoCo 미리보기:
 
 ```powershell
-python mujoco_rps_demo.py
+python -m rps.mujoco_demo
 ```
 
 웹캠의 오른손 동작을 MuJoCo LEAP Hand가 실시간으로 따라 하게 하려면:
@@ -70,7 +70,7 @@ MediaPipe 영상 창과 MuJoCo 뷰어가 함께 열립니다. 영상 창에서 `
 
 ## 4. LEAP Hand v1 실물 API
 
-`LeapHandHardwareController`는 DYNAMIXEL XC330 기반 16모터 LEAP Hand v1 전용입니다. v2의 8모터 텐던 구조에는 사용할 수 없습니다. 공식 LEAPsim 관절 범위를 적용하고, `0°=편 손`인 현재 프로젝트 각도를 실물 모터의 `π rad=편 손` 좌표로 변환합니다.
+`LeapHandHardwareController`는 DYNAMIXEL XC330 기반 16모터 LEAP Hand v1 전용입니다. v2의 8모터 텐던 구조에는 사용할 수 없습니다. 공식 LEAPsim 관절 범위를 적용하고, `0°=편 손`인 현재 프로젝트 각도를 실물 모터의 `π rad=편 손` 좌표로 변환합니다. 모든 목표 명령에는 기본 `120°/s`의 관절별 속도 제한이 적용되며, 통신이 잠시 멈췄다가 재개돼도 한 번에 허용되는 변화량은 기본 0.1초분(`12°`)으로 제한됩니다.
 
 안전을 위해 객체를 생성하거나 `connect()`만 호출해서는 토크가 켜지지 않습니다.
 
@@ -94,6 +94,27 @@ close()         → 즉시 Torque OFF 후 포트 닫기
 .\.venv\Scripts\python.exe leap_hand_hardware_check.py --port COM13 --torque-test
 ```
 
+실물 손을 편 중립 자세에 놓고 모터별 영점을 기록하려면, Torque OFF 상태에서 다음을 실행합니다. 기록 파일은 기본적으로 `calibration/hardware_motors.yaml`에 저장되며 개인 장비 데이터이므로 Git에서 제외됩니다.
+
+```powershell
+.\.venv\Scripts\python.exe leap_hand_motor_calibration.py --port COM13
+```
+
+손을 의도한 편 자세로 고정한 뒤 터미널에 정확히 `RECORD`를 입력합니다. 이 과정은 모터를 움직이거나 Torque를 켜지 않습니다. 생성된 파일은 각 관절의 모터 ID, 편 손 raw 위치, 방향(`sign`)을 저장합니다. 방향은 모두 처음에 `1`로 저장되므로, 아래 단일 관절 시험에서 반대 방향으로 움직이는 관절만 `sign: -1`로 수정합니다. 보정 파일을 사용할 때는 점검·시험 명령에 `--motor-calibration-file calibration/hardware_motors.yaml`를 추가합니다.
+
+그다음에는 전체 손이 아니라 관절 하나만 현재 자세에서 기본 `+5°` 이동했다가 원래 자세로 복귀하는 저속 테스트를 수행합니다. 이 스크립트는 최대 전류를 300mA, 이동량을 15°, 속도를 60°/s로 제한하며, 실행 전 터미널에 정확히 `MOVE`를 입력해야 Torque가 켜집니다. 나머지 15개 관절은 시작 위치를 유지합니다.
+
+```powershell
+.\.venv\Scripts\python.exe leap_hand_joint_test.py `
+  --port COM13 `
+  --joint index_pip_flex `
+  --delta 5 `
+  --max-joint-speed 30 `
+  --motor-calibration-file calibration/hardware_motors.yaml
+```
+
+반대 방향은 `--delta -5`로 확인합니다. 테스트 도중 명령과 실제 위치 차이가 기본 15°를 넘거나, 모터 온도가 기본 50°C 이상이거나, hardware error가 보고되면 예외를 발생시키고 `finally`에서 즉시 Torque OFF를 요청합니다.
+
 Python API 예시:
 
 ```python
@@ -107,7 +128,9 @@ with LeapHandHardwareController("COM13", current_limit_milliamps=300) as hand:
     health = hand.read_health()
 ```
 
-어떤 예외나 `Ctrl+C`가 발생해도 context manager와 점검 스크립트의 `finally`에서 Torque OFF를 요청합니다. 통신 자체가 끊기는 경우에는 500ms DYNAMIXEL Bus Watchdog가 추가로 동작합니다. 실물 비전 연동은 속도 제한, 추적 손실 fail-safe와 피드백 감시를 더한 뒤 이 API에 연결합니다.
+어떤 예외나 `Ctrl+C`가 발생해도 context manager와 점검 스크립트의 `finally`에서 Torque OFF를 요청합니다. 통신 자체가 끊기는 경우에는 500ms DYNAMIXEL Bus Watchdog가 추가로 동작합니다. 실물 비전 연동은 추적 손실 fail-safe와 피드백 감시를 더한 뒤 이 API에 연결합니다.
+
+속도 제한은 `--max-joint-speed 90`처럼 점검 CLI에서 조절할 수 있습니다. `command_degrees()`를 반복 호출할 때 실제 경과 시간만큼 목표가 전진하므로, 별도의 보간 코드를 작성하지 않아도 컨트롤러 내부에서 급격한 목표 변화가 제한됩니다.
 
 ## 5. 실행
 
@@ -159,7 +182,7 @@ RPS 분류는 회전과 손 크기에 덜 민감하도록 MediaPipe의 3D 랜드
 로봇 제어 코드 연결 지점:
 
 ```python
-from rps_rounds import CsvRoundRecorder, RpsRoundSession
+from rps.rounds import CsvRoundRecorder, RpsRoundSession
 
 session = RpsRoundSession(CsvRoundRecorder("rps_results.csv"))
 session.start_round(robot_move)  # robot_move는 로봇 코드가 이미 알고 있는 값
