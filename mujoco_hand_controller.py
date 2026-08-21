@@ -56,7 +56,8 @@ class MujocoHandController:
 
     Input commands follow ``hand_angles.ANGLE_NAMES`` and use degrees. The
     MuJoCo position actuators receive radians after order, sign, offset, and
-    control-range conversion.
+    control-range conversion. The optional collision-safe setter predicts
+    hand self-contact in scratch simulation data before applying a target.
     """
 
     def __init__(
@@ -104,8 +105,24 @@ class MujocoHandController:
 
         joint_ids = self.model.actuator_trnid[self.actuator_ids, 0]
         self.qpos_addresses = self.model.jnt_qposadr[joint_ids]
+        palm_body_id = mujoco.mj_name2id(
+            self.model,
+            mujoco.mjtObj.mjOBJ_BODY,
+            "palm",
+        )
+        if palm_body_id < 0:
+            raise ValueError("MuJoCo model is missing the palm body")
+        self._hand_body_ids = {
+            body_id
+            for body_id in range(1, self.model.nbody)
+            if self._is_descendant_body(body_id, palm_body_id)
+        }
+        self._collision_data = mujoco.MjData(self.model)
         self._viewer = None
         self._target_radians = np.zeros(16, dtype=np.float64)
+        self._last_safe_command_degrees = np.zeros(16, dtype=np.float64)
+        self._last_collision_scale = 1.0
+        self._last_predicted_self_contacts = 0
         self.reset()
 
     @property
@@ -118,21 +135,124 @@ class MujocoHandController:
         """Return the last clipped actuator targets in human-angle order."""
         return self._target_radians.copy()
 
-    def set_target_degrees(self, angles_degrees: Sequence[float]) -> np.ndarray:
-        """Set 16 position targets and return their clipped radian values."""
+    @property
+    def last_collision_scale(self) -> float:
+        """Return the fraction of the latest requested pose that was applied."""
+        return self._last_collision_scale
+
+    @property
+    def last_predicted_self_contacts(self) -> int:
+        """Return self-contacts found in the latest unmodified target pose."""
+        return self._last_predicted_self_contacts
+
+    def _is_descendant_body(self, body_id: int, ancestor_id: int) -> bool:
+        current_id = body_id
+        while current_id > 0:
+            if current_id == ancestor_id:
+                return True
+            current_id = int(self.model.body_parentid[current_id])
+        return False
+
+    def _target_from_degrees(self, angles_degrees: Sequence[float]) -> np.ndarray:
         human_degrees = _vector16(angles_degrees, "angles_degrees")
         model_degrees = human_degrees * self.signs + self.offsets_degrees
         target_radians = np.deg2rad(model_degrees)
-
         control_ranges = self.model.actuator_ctrlrange[self.actuator_ids]
-        target_radians = np.clip(
+        return np.clip(
             target_radians,
             control_ranges[:, 0],
             control_ranges[:, 1],
         )
+
+    def set_target_degrees(self, angles_degrees: Sequence[float]) -> np.ndarray:
+        """Set 16 position targets and return their clipped radian values."""
+        target_radians = self._target_from_degrees(angles_degrees)
         self.data.ctrl[self.actuator_ids] = target_radians
         self._target_radians = target_radians
         return target_radians.copy()
+
+    def _predicted_self_contact_count(
+        self,
+        angles_degrees: Sequence[float],
+    ) -> int:
+        """Count hand-vs-hand contacts at a candidate kinematic target pose."""
+        target_radians = self._target_from_degrees(angles_degrees)
+        mujoco.mj_resetData(self.model, self._collision_data)
+        self._collision_data.qpos[self.qpos_addresses] = target_radians
+        mujoco.mj_forward(self.model, self._collision_data)
+
+        contact_count = 0
+        for contact in self._collision_data.contact:
+            body1 = int(self.model.geom_bodyid[contact.geom1])
+            body2 = int(self.model.geom_bodyid[contact.geom2])
+            if body1 in self._hand_body_ids and body2 in self._hand_body_ids:
+                contact_count += 1
+        return contact_count
+
+    def set_collision_safe_target_degrees(
+        self,
+        angles_degrees: Sequence[float],
+        *,
+        search_iterations: int = 12,
+        backoff_ratio: float = 0.98,
+    ) -> np.ndarray:
+        """Apply the largest contact-free fraction of a requested hand pose.
+
+        The candidate is checked kinematically in scratch ``MjData`` before it
+        reaches the live simulation. If self-contact is predicted, a binary
+        search advances only from the previously safe pose toward the new
+        request. This prevents the whole hand from snapping open toward zero.
+        The returned vector is the applied command in human-angle degrees.
+        """
+        requested = _vector16(angles_degrees, "angles_degrees")
+        if not isinstance(search_iterations, int) or search_iterations < 1:
+            raise ValueError("search_iterations must be a positive integer")
+        if not np.isfinite(backoff_ratio) or not 0.0 < backoff_ratio <= 1.0:
+            raise ValueError("backoff_ratio must be in the interval (0, 1]")
+
+        predicted_contacts = self._predicted_self_contact_count(requested)
+        self._last_predicted_self_contacts = predicted_contacts
+        if predicted_contacts == 0:
+            self._last_collision_scale = 1.0
+            self._last_safe_command_degrees = requested.copy()
+            self.set_target_degrees(requested)
+            return requested.copy()
+
+        safe_origin = self._last_safe_command_degrees.copy()
+        if self._predicted_self_contact_count(safe_origin) > 0:
+            safe_origin = np.zeros(16, dtype=np.float64)
+        if self._predicted_self_contact_count(safe_origin) > 0:
+            raise RuntimeError("Neutral MuJoCo hand pose contains self-contact")
+
+        safe_motion_fraction = 0.0
+        colliding_motion_fraction = 1.0
+        for _ in range(search_iterations):
+            candidate_fraction = 0.5 * (
+                safe_motion_fraction + colliding_motion_fraction
+            )
+            candidate = safe_origin + candidate_fraction * (
+                requested - safe_origin
+            )
+            if self._predicted_self_contact_count(candidate) == 0:
+                safe_motion_fraction = candidate_fraction
+            else:
+                colliding_motion_fraction = candidate_fraction
+
+        applied_motion_fraction = safe_motion_fraction * backoff_ratio
+        applied = safe_origin + applied_motion_fraction * (
+            requested - safe_origin
+        )
+        requested_magnitude = float(np.linalg.norm(requested))
+        if requested_magnitude > 1e-9:
+            self._last_collision_scale = min(
+                1.0,
+                float(np.linalg.norm(applied)) / requested_magnitude,
+            )
+        else:
+            self._last_collision_scale = 1.0
+        self._last_safe_command_degrees = applied.copy()
+        self.set_target_degrees(applied)
+        return applied.copy()
 
     def step(self, steps: int = 1) -> None:
         """Advance the physics simulation by an integer number of steps."""
@@ -158,6 +278,9 @@ class MujocoHandController:
         """Reset simulation state and command a neutral zero-degree pose."""
         mujoco.mj_resetData(self.model, self.data)
         self.set_target_degrees(np.zeros(16, dtype=np.float64))
+        self._last_safe_command_degrees = np.zeros(16, dtype=np.float64)
+        self._last_collision_scale = 1.0
+        self._last_predicted_self_contacts = 0
         mujoco.mj_forward(self.model, self.data)
         self.sync_viewer()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
@@ -11,6 +12,10 @@ import mediapipe as mp
 
 from deadband_filter import AngleDeadband
 from hand_angles import DISPLAY_NAMES, calculate_leap_control_angles
+from neutral_calibration import (
+    DEFAULT_FLEXION_TARGETS_DEGREES,
+    NeutralCalibration,
+)
 from one_euro_filter import OneEuroFilter
 from rps_gesture import GestureClassification, GestureStabilizer, classify_rps_gesture
 from rps_moves import MOVE_NAMES
@@ -27,9 +32,20 @@ HAND_CONNECTIONS = (
 )
 
 FINGERTIP_IDS = {4, 8, 12, 16, 20}
+DEFAULT_MUJOCO_MODEL_PATH = (
+    Path(__file__).resolve().parent
+    / "models"
+    / "mujoco"
+    / "leap_hand"
+    / "scene_right.xml"
+)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(
+    argv: Sequence[str] | None = None,
+    *,
+    default_mujoco: bool = False,
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Track hand landmarks from a laptop webcam."
     )
@@ -66,6 +82,35 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.2,
         help="Minimum filtered angle change to emit, in degrees; 0 disables it",
+    )
+    parser.add_argument(
+        "--profile",
+        default="default",
+        help="Person name used to select a neutral-calibration profile",
+    )
+    parser.add_argument(
+        "--calibration-file",
+        type=Path,
+        default=Path("calibration/neutral_angles.json"),
+        help="JSON file containing per-person neutral offsets",
+    )
+    parser.add_argument(
+        "--calibration-seconds",
+        type=float,
+        default=1.5,
+        help="Seconds of pose samples collected after pressing C or F",
+    )
+    parser.add_argument(
+        "--flexion-scale",
+        type=float,
+        default=1.0,
+        help="Scale all range-calibrated MuJoCo flexion targets",
+    )
+    parser.add_argument(
+        "--neutral-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply the selected person's saved neutral calibration",
     )
     parser.add_argument(
         "--filter",
@@ -126,7 +171,25 @@ def parse_args() -> argparse.Namespace:
         default=Path("rps_results.csv"),
         help="CSV file used to append completed round results",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--mujoco",
+        action=argparse.BooleanOptionalAction,
+        default=default_mujoco,
+        help="Open the MuJoCo viewer and drive its right LEAP Hand",
+    )
+    parser.add_argument(
+        "--mujoco-model",
+        type=Path,
+        default=DEFAULT_MUJOCO_MODEL_PATH,
+        help="Path to the right LEAP Hand MuJoCo scene",
+    )
+    parser.add_argument(
+        "--collision-avoidance",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Predict and limit MuJoCo targets that cause hand self-contact",
+    )
+    return parser.parse_args(argv)
 
 
 def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
@@ -335,10 +398,14 @@ def draw_round_status(frame, session: RpsRoundSession) -> None:
         )
 
 
-def main() -> None:
-    args = parse_args()
+def main(*, default_mujoco: bool = False) -> None:
+    args = parse_args(default_mujoco=default_mujoco)
     if args.deadband < 0.0:
         raise ValueError("--deadband must be zero or greater")
+    if args.calibration_seconds <= 0.0:
+        raise ValueError("--calibration-seconds must be greater than zero")
+    if args.flexion_scale <= 0.0:
+        raise ValueError("--flexion-scale must be greater than zero")
     if args.gesture_stable_frames < 1:
         raise ValueError("--gesture-stable-frames must be at least one")
     if args.gesture_extended_max < 0.0:
@@ -358,12 +425,20 @@ def main() -> None:
             "--gesture-thumb-curled-max-span"
         )
 
-    processing_steps = []
+    base_processing_steps = []
     if args.filter:
-        processing_steps.append("One Euro")
+        base_processing_steps.append("One Euro")
     if args.deadband > 0.0:
-        processing_steps.append(f"deadband {args.deadband:.1f}")
-    processing_label = " + ".join(processing_steps) or None
+        base_processing_steps.append(f"deadband {args.deadband:.1f}")
+
+    neutral_calibration = NeutralCalibration(
+        args.calibration_file,
+        profile=args.profile,
+        duration_seconds=args.calibration_seconds,
+        flexion_targets_degrees=(
+            DEFAULT_FLEXION_TARGETS_DEGREES * args.flexion_scale
+        ),
+    )
 
     model_path = args.model.resolve()
     if not model_path.is_file():
@@ -381,8 +456,23 @@ def main() -> None:
         min_tracking_confidence=0.7,
     )
 
-    capture = open_camera(args.camera, args.width, args.height)
-    window_name = "MediaPipe Hand Tracking - Q/ESC to quit"
+    mujoco_controller = None
+    mujoco_viewer = None
+    try:
+        if args.mujoco:
+            from mujoco_hand_controller import MujocoHandController
+
+            mujoco_controller = MujocoHandController(args.mujoco_model)
+            mujoco_viewer = mujoco_controller.launch_viewer()
+
+        capture = open_camera(args.camera, args.width, args.height)
+    except Exception:
+        if mujoco_controller is not None:
+            mujoco_controller.close()
+        raise
+    window_name = "MediaPipe + MuJoCo Teleoperation" if args.mujoco else (
+        "MediaPipe Hand Tracking - C/F calibrate | Q/ESC quit"
+    )
     previous_frame_time = time.perf_counter()
     smoothed_fps = 0.0
     last_timestamp_ms = -1
@@ -393,6 +483,7 @@ def main() -> None:
     if args.robot_move:
         round_session.start_round(args.robot_move)
     last_hand_seen_seconds: float | None = None
+    last_simulation_time = time.perf_counter()
 
     try:
         with mp.tasks.vision.HandLandmarker.create_from_options(options) as landmarker:
@@ -427,6 +518,9 @@ def main() -> None:
                 if args.mirror:
                     frame = cv2.flip(frame, 1)
 
+                visible_hand_labels: list[str] = []
+                mujoco_command_sent = False
+                mujoco_collision_scale = 1.0
                 for index, landmarks in enumerate(result.hand_landmarks):
                     handedness = (
                         result.handedness[index]
@@ -498,6 +592,30 @@ def main() -> None:
                             cv2.LINE_AA,
                         )
                     else:
+                        visible_hand_labels.append(hand_label)
+                        if args.neutral_calibration:
+                            completed_pose = neutral_calibration.active_pose
+                            calibration_completed = neutral_calibration.add_sample(
+                                hand_label,
+                                angles,
+                                timestamp_seconds,
+                            )
+                            if calibration_completed:
+                                angle_filters.pop(filter_key, None)
+                                angle_deadbands.pop(filter_key, None)
+                                print(
+                                    f"[{args.profile}] {hand_label} "
+                                    f"{completed_pose} "
+                                    f"calibration saved to "
+                                    f"{neutral_calibration.path.resolve()}"
+                                )
+                            calibrated_angles = neutral_calibration.apply(
+                                hand_label,
+                                angles,
+                            )
+                        else:
+                            calibrated_angles = angles
+
                         if args.filter:
                             angle_filter = angle_filters.get(filter_key)
                             if angle_filter is None:
@@ -508,11 +626,11 @@ def main() -> None:
                                 )
                                 angle_filters[filter_key] = angle_filter
                             filtered_angles = angle_filter.filter(
-                                angles,
+                                calibrated_angles,
                                 timestamp_seconds,
                             )
                         else:
-                            filtered_angles = angles
+                            filtered_angles = calibrated_angles
 
                         if args.deadband > 0.0:
                             angle_deadband = angle_deadbands.get(filter_key)
@@ -523,16 +641,57 @@ def main() -> None:
                         else:
                             command_angles = filtered_angles
 
+                        if mujoco_controller is not None and hand_label == "Right":
+                            if args.collision_avoidance:
+                                command_angles = (
+                                    mujoco_controller.set_collision_safe_target_degrees(
+                                        command_angles,
+                                    )
+                                )
+                                mujoco_collision_scale = (
+                                    mujoco_controller.last_collision_scale
+                                )
+                            else:
+                                mujoco_controller.set_target_degrees(command_angles)
+                            mujoco_command_sent = True
+
+                        processing_steps = []
+                        if (
+                            args.neutral_calibration
+                            and neutral_calibration.has_offset(hand_label)
+                        ):
+                            calibration_mode = (
+                                "range"
+                                if neutral_calibration.has_range(hand_label)
+                                else "neutral"
+                            )
+                            processing_steps.append(
+                                f"{calibration_mode}:{args.profile}"
+                            )
+                        processing_steps.extend(base_processing_steps)
+                        hand_processing_label = " + ".join(processing_steps) or None
+
                         draw_angle_panel(
                             frame,
                             angles,
                             command_angles,
                             hand_label,
                             index,
-                            processing_label,
+                            hand_processing_label,
                         )
 
                 now = time.perf_counter()
+                if mujoco_controller is not None:
+                    if mujoco_viewer is None or not mujoco_viewer.is_running():
+                        break
+                    simulation_duration = min(
+                        max(now - last_simulation_time, mujoco_controller.timestep),
+                        0.1,
+                    )
+                    mujoco_controller.step_for(simulation_duration)
+                    mujoco_controller.sync_viewer()
+                    last_simulation_time = now
+
                 instantaneous_fps = 1.0 / max(now - previous_frame_time, 1e-6)
                 previous_frame_time = now
                 smoothed_fps = (
@@ -553,12 +712,36 @@ def main() -> None:
                     2,
                     cv2.LINE_AA,
                 )
+
+                if mujoco_controller is not None:
+                    if not mujoco_command_sent:
+                        mujoco_text = "MUJOCO: WAITING FOR RIGHT HAND"
+                        mujoco_color = (0, 190, 255)
+                    elif mujoco_collision_scale < 0.999:
+                        mujoco_text = (
+                            "MUJOCO: SELF-COLLISION HOLD | "
+                            f"{mujoco_collision_scale * 100:.0f}% TARGET"
+                        )
+                        mujoco_color = (0, 190, 255)
+                    else:
+                        mujoco_text = "MUJOCO: FOLLOWING RIGHT HAND"
+                        mujoco_color = (80, 255, 160)
+                    cv2.putText(
+                        frame,
+                        mujoco_text,
+                        (18, 96),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        mujoco_color,
+                        1,
+                        cv2.LINE_AA,
+                    )
                 cv2.putText(
                     frame,
                     (
-                        f"Move, open, close, rotate | raw > {processing_label}"
-                        if processing_label
-                        else "Move, open, close, rotate | processing OFF"
+                        f"Profile: {args.profile} | C: open hand | F: closed fist"
+                        if args.neutral_calibration
+                        else "Neutral calibration OFF"
                     ),
                     (18, 66),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -568,6 +751,30 @@ def main() -> None:
                     cv2.LINE_AA,
                 )
                 draw_round_status(frame, round_session)
+
+                if neutral_calibration.is_collecting:
+                    progress = neutral_calibration.progress(timestamp_seconds)
+                    pose_instruction = (
+                        "KEEP HAND OPEN"
+                        if neutral_calibration.active_pose == "neutral"
+                        else "KEEP FIST FULLY CLOSED"
+                    )
+                    calibration_text = (
+                        f"CALIBRATING {neutral_calibration.active_hand} "
+                        f"{neutral_calibration.active_pose}: "
+                        f"{progress * 100:3.0f}% | {pose_instruction} "
+                        f"({neutral_calibration.sample_count} samples)"
+                    )
+                    cv2.putText(
+                        frame,
+                        calibration_text,
+                        (18, frame.shape[0] - 24),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        (0, 220, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
 
                 cv2.imshow(window_name, frame)
                 key = cv2.waitKey(1) & 0xFF
@@ -582,9 +789,55 @@ def main() -> None:
                     robot_move = robot_move_keys[key]
                     round_session.start_round(robot_move)
                     print(f"Robot move set to {robot_move}; waiting for human.", flush=True)
+                if key in (ord("c"), ord("C")):
+                    if not args.neutral_calibration:
+                        print("Neutral calibration is disabled.")
+                    elif not visible_hand_labels:
+                        print("손이 보이지 않습니다. 손을 편 상태로 화면에 보여주세요.")
+                    else:
+                        calibration_hand = visible_hand_labels[0]
+                        neutral_calibration.start(
+                            calibration_hand,
+                            timestamp_seconds,
+                            pose="neutral",
+                        )
+                        angle_filters.pop(calibration_hand, None)
+                        angle_deadbands.pop(calibration_hand, None)
+                        print(
+                            f"[{args.profile}] {calibration_hand} calibration "
+                            f"started. Keep the hand open for "
+                            f"{args.calibration_seconds:.1f} seconds."
+                        )
+                if key in (ord("f"), ord("F")):
+                    if not args.neutral_calibration:
+                        print("Neutral calibration is disabled.")
+                    elif not visible_hand_labels:
+                        print("손이 보이지 않습니다. 주먹을 쥔 상태로 보여주세요.")
+                    else:
+                        calibration_hand = visible_hand_labels[0]
+                        if not neutral_calibration.has_offset(calibration_hand):
+                            print(
+                                f"[{args.profile}] {calibration_hand}: "
+                                "C 키로 편 손 캘리브레이션을 먼저 하세요."
+                            )
+                        else:
+                            neutral_calibration.start(
+                                calibration_hand,
+                                timestamp_seconds,
+                                pose="closed",
+                            )
+                            angle_filters.pop(calibration_hand, None)
+                            angle_deadbands.pop(calibration_hand, None)
+                            print(
+                                f"[{args.profile}] {calibration_hand} closed-pose "
+                                f"calibration started. Keep a full fist for "
+                                f"{args.calibration_seconds:.1f} seconds."
+                            )
     finally:
         capture.release()
         cv2.destroyAllWindows()
+        if mujoco_controller is not None:
+            mujoco_controller.close()
 
 
 if __name__ == "__main__":

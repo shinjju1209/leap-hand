@@ -3,6 +3,10 @@ import unittest
 import numpy as np
 
 from mujoco_hand_controller import INPUT_TO_ACTUATOR, MujocoHandController
+from neutral_calibration import (
+    DEFAULT_FLEXION_TARGETS_DEGREES,
+    FLEX_ANGLE_INDICES,
+)
 
 
 class MujocoHandControllerTests(unittest.TestCase):
@@ -64,6 +68,57 @@ class MujocoHandControllerTests(unittest.TestCase):
     def test_invalid_command_shape_is_rejected(self):
         with self.assertRaises(ValueError):
             self.controller.set_target_degrees(np.zeros(15))
+
+    def test_collision_safe_target_leaves_open_pose_unchanged(self):
+        requested = np.zeros(16)
+        requested[1] = 20.0
+        applied = self.controller.set_collision_safe_target_degrees(requested)
+        np.testing.assert_array_equal(applied, requested)
+        self.assertEqual(self.controller.last_collision_scale, 1.0)
+        self.assertEqual(self.controller.last_predicted_self_contacts, 0)
+
+    def test_collision_safe_target_backs_full_fist_off(self):
+        applied = self.controller.set_collision_safe_target_degrees(
+            DEFAULT_FLEXION_TARGETS_DEGREES
+        )
+        self.assertGreater(self.controller.last_predicted_self_contacts, 0)
+        self.assertGreater(self.controller.last_collision_scale, 0.0)
+        self.assertLess(self.controller.last_collision_scale, 1.0)
+        self.assertEqual(
+            self.controller._predicted_self_contact_count(applied),
+            0,
+        )
+        self.controller.step_for(1.0)
+        self.assertEqual(self.controller.data.ncon, 0)
+
+    def test_collision_limiter_arguments_are_validated(self):
+        with self.assertRaises(ValueError):
+            self.controller.set_collision_safe_target_degrees(
+                np.zeros(16),
+                search_iterations=0,
+            )
+        with self.assertRaises(ValueError):
+            self.controller.set_collision_safe_target_degrees(
+                np.zeros(16),
+                backoff_ratio=0.0,
+            )
+
+    def test_new_collision_does_not_snap_fingers_back_toward_zero(self):
+        first = self.controller.set_collision_safe_target_degrees(
+            DEFAULT_FLEXION_TARGETS_DEGREES
+        )
+        changed = DEFAULT_FLEXION_TARGETS_DEGREES.copy()
+        changed[0] = 30.0
+        second = self.controller.set_collision_safe_target_degrees(changed)
+
+        np.testing.assert_array_less(
+            first[FLEX_ANGLE_INDICES] - 1e-9,
+            second[FLEX_ANGLE_INDICES],
+        )
+        self.assertEqual(
+            self.controller._predicted_self_contact_count(second),
+            0,
+        )
 
 
 if __name__ == "__main__":
