@@ -15,8 +15,8 @@ class OneEuroFilter:
 
     def __init__(
         self,
-        min_cutoff: float = 1.2,
-        beta: float = 0.05,
+        min_cutoff: float = 0.5,
+        beta: float = 0.08,
         derivative_cutoff: float = 1.0,
     ) -> None:
         if min_cutoff <= 0.0:

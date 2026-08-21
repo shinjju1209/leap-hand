@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 
+from deadband_filter import AngleDeadband
 from hand_angles import DISPLAY_NAMES, calculate_leap_control_angles
 from one_euro_filter import OneEuroFilter
 
@@ -42,13 +43,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-cutoff",
         type=float,
-        default=1.2,
+        default=0.5,
         help="One Euro smoothing strength while nearly stationary",
     )
     parser.add_argument(
         "--beta",
         type=float,
-        default=0.05,
+        default=0.08,
         help="One Euro responsiveness to fast motion",
     )
     parser.add_argument(
@@ -56,6 +57,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="One Euro derivative low-pass cutoff",
+    )
+    parser.add_argument(
+        "--deadband",
+        type=float,
+        default=1.2,
+        help="Minimum filtered angle change to emit, in degrees; 0 disables it",
     )
     parser.add_argument(
         "--filter",
@@ -133,12 +140,12 @@ def draw_hand(frame, landmarks, handedness, mirror_display: bool) -> None:
 def draw_angle_panel(
     frame,
     raw_angles,
-    filtered_angles,
+    output_angles,
     hand_label: str,
     panel_index: int,
-    filter_enabled: bool,
+    processing_label: str | None,
 ) -> None:
-    """Draw raw and filtered human-hand angles in two columns."""
+    """Draw raw and processed human-hand angles in two columns."""
     panel_width = 610
     panel_height = 236
     x0 = max(8, frame.shape[1] - panel_width - 14)
@@ -153,9 +160,9 @@ def draw_angle_panel(
     cv2.putText(
         frame,
         (
-            f"{hand_label} joint angles: raw -> One Euro (deg)"
-            if filter_enabled
-            else f"{hand_label} joint angles: filter OFF (deg)"
+            f"{hand_label} joint angles: raw -> {processing_label} (deg)"
+            if processing_label
+            else f"{hand_label} joint angles: processing OFF (deg)"
         ),
         (x0 + 12, y0 + 25),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -166,8 +173,8 @@ def draw_angle_panel(
     )
 
     column_width = 296
-    for index, (name, raw_value, filtered_value) in enumerate(
-        zip(DISPLAY_NAMES, raw_angles, filtered_angles)
+    for index, (name, raw_value, output_value) in enumerate(
+        zip(DISPLAY_NAMES, raw_angles, output_angles)
     ):
         column = index // 8
         row = index % 8
@@ -176,8 +183,8 @@ def draw_angle_panel(
         cv2.putText(
             frame,
             (
-                f"{name:<17} {raw_value:6.1f} > {filtered_value:6.1f}"
-                if filter_enabled
+                f"{name:<17} {raw_value:6.1f} > {output_value:6.1f}"
+                if processing_label
                 else f"{name:<17} {raw_value:6.1f}"
             ),
             (text_x, text_y),
@@ -191,6 +198,16 @@ def draw_angle_panel(
 
 def main() -> None:
     args = parse_args()
+    if args.deadband < 0.0:
+        raise ValueError("--deadband must be zero or greater")
+
+    processing_steps = []
+    if args.filter:
+        processing_steps.append("One Euro")
+    if args.deadband > 0.0:
+        processing_steps.append(f"deadband {args.deadband:.1f}")
+    processing_label = " + ".join(processing_steps) or None
+
     model_path = args.model.resolve()
     if not model_path.is_file():
         raise FileNotFoundError(
@@ -213,6 +230,7 @@ def main() -> None:
     smoothed_fps = 0.0
     last_timestamp_ms = -1
     angle_filters: dict[str, OneEuroFilter] = {}
+    angle_deadbands: dict[str, AngleDeadband] = {}
     last_hand_seen_seconds: float | None = None
 
     try:
@@ -241,6 +259,7 @@ def main() -> None:
                     and timestamp_seconds - last_hand_seen_seconds > 0.5
                 ):
                     angle_filters.clear()
+                    angle_deadbands.clear()
                     last_hand_seen_seconds = None
 
                 if args.mirror:
@@ -295,13 +314,22 @@ def main() -> None:
                         else:
                             filtered_angles = angles
 
+                        if args.deadband > 0.0:
+                            angle_deadband = angle_deadbands.get(filter_key)
+                            if angle_deadband is None:
+                                angle_deadband = AngleDeadband(args.deadband)
+                                angle_deadbands[filter_key] = angle_deadband
+                            command_angles = angle_deadband.filter(filtered_angles)
+                        else:
+                            command_angles = filtered_angles
+
                         draw_angle_panel(
                             frame,
                             angles,
-                            filtered_angles,
+                            command_angles,
                             hand_label,
                             index,
-                            args.filter,
+                            processing_label,
                         )
 
                 now = time.perf_counter()
@@ -328,9 +356,9 @@ def main() -> None:
                 cv2.putText(
                     frame,
                     (
-                        "Move, open, close, rotate | raw > One Euro"
-                        if args.filter
-                        else "Move, open, close, rotate | filter OFF"
+                        f"Move, open, close, rotate | raw > {processing_label}"
+                        if processing_label
+                        else "Move, open, close, rotate | processing OFF"
                     ),
                     (18, 66),
                     cv2.FONT_HERSHEY_SIMPLEX,
