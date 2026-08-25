@@ -4,6 +4,15 @@
 
 ## 1. 가상환경과 패키지 설치
 
+### Linux (Ubuntu)
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### Windows (PowerShell)
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -13,6 +22,15 @@ pip install -r requirements.txt
 
 ## 2. MediaPipe 모델 다운로드
 
+> 저장소에 `models/hand_landmarker.task`가 이미 포함되어 있지 않은 경우에만 다운로드합니다.
+
+### Linux (Ubuntu)
+```bash
+mkdir -p models
+curl -L -o models/hand_landmarker.task "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+```
+
+### Windows (PowerShell)
 ```powershell
 New-Item -ItemType Directory -Force models
 Invoke-WebRequest `

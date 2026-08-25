@@ -19,13 +19,15 @@ def parse_args() -> argparse.Namespace:
         "moves",
         nargs="*",
         choices=MOVE_NAMES,
-        default=list(MOVE_NAMES),
         help="Moves to show in order (default: rock paper scissors)",
     )
     parser.add_argument("--transition-seconds", type=float, default=0.8)
     parser.add_argument("--hold-seconds", type=float, default=1.5)
     parser.add_argument("--update-hz", type=float, default=60.0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.moves:
+        args.moves = list(MOVE_NAMES)
+    return args
 
 
 def validate_args(args: argparse.Namespace) -> None:

@@ -13,12 +13,14 @@ class RpsPostureTests(unittest.TestCase):
             self.assertEqual(posture.shape, (16,))
             self.assertTrue(np.all(np.isfinite(posture)))
 
-    def test_scissors_extends_index_and_middle_only(self):
+    def test_scissors_extends_index_and_thumb_only(self):
         scissors = get_posture("scissors")
-        for finger in ("index", "middle"):
-            for joint in ("mcp_flex", "pip_flex", "dip_flex"):
-                self.assertEqual(scissors[ANGLE_NAMES.index(f"{finger}_{joint}")], 0.0)
-        for finger in ("ring", "thumb"):
+        for finger in ("index", "thumb"):
+            for joint in ("mcp_flex", "pip_flex", "dip_flex", "cmc_flex", "ip_flex"):
+                joint_name = f"{finger}_{joint}"
+                if joint_name in ANGLE_NAMES:
+                    self.assertEqual(scissors[ANGLE_NAMES.index(joint_name)], 0.0)
+        for finger in ("middle", "ring"):
             flex_indices = [
                 index
                 for index, name in enumerate(ANGLE_NAMES)

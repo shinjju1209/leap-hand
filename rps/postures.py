@@ -50,7 +50,7 @@ RPS_POSTURES = {
         _CLOSED_INDEX | _CLOSED_MIDDLE | _CLOSED_RING | _CLOSED_THUMB
     ),
     "paper": make_posture({}),
-    "scissors": make_posture(_CLOSED_RING | _CLOSED_THUMB),
+    "scissors": make_posture(_CLOSED_MIDDLE | _CLOSED_RING),
 }
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -193,8 +194,14 @@ def parse_args(
 
 
 def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
-    # DirectShow normally opens integrated cameras faster on Windows.
-    capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    # DirectShow for Windows, V4L2 for Linux, generic fallback otherwise
+    if sys.platform.startswith("win"):
+        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    elif sys.platform.startswith("linux"):
+        capture = cv2.VideoCapture(index, cv2.CAP_V4L2)
+    else:
+        capture = cv2.VideoCapture(index)
+
     if not capture.isOpened():
         capture.release()
         capture = cv2.VideoCapture(index)

@@ -300,7 +300,11 @@ class MujocoHandController:
     def close(self) -> None:
         """Close the optional viewer."""
         if self._viewer is not None:
-            self._viewer.close()
+            try:
+                if self._viewer.is_running():
+                    self._viewer.close()
+            except Exception:
+                pass
             self._viewer = None
 
     def __enter__(self) -> "MujocoHandController":
