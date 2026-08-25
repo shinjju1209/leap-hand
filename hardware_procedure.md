@@ -1,6 +1,6 @@
-# LEAP Hand v1 실물 연결 및 시험 절차
+# LEAP Hand v1 실물 연결 및 시험 절차 (Ubuntu Linux / Windows)
 
-이 문서는 Windows 노트북에서 DYNAMIXEL XC330 기반 16모터 LEAP Hand v1을 현재 프로젝트 코드로 점검하는 순서를 설명합니다. v2의 8모터 텐던형 LEAP Hand에는 이 코드를 사용하면 안 됩니다.
+이 문서는 Ubuntu Linux (및 Windows) 환경에서 DYNAMIXEL XC330 기반 16모터 LEAP Hand v1을 현재 프로젝트 코드로 점검하는 순서를 설명합니다. v2의 8모터 텐던형 LEAP Hand에는 이 코드를 사용하면 안 됩니다.
 
 > **중요:** 실물 시험 중에는 손가락과 링크 주변에 사람의 손, 케이블, 공구를 두지 마세요. 소프트웨어 Torque OFF가 실패할 경우를 대비해 5V 전원을 즉시 물리적으로 차단할 수 있어야 합니다.
 
@@ -10,7 +10,7 @@
 
 ```text
 전원 및 배선 확인
-→ COM 포트와 ID 0~15 확인
+→ 시리얼 포트(/dev/ttyUSB0)와 ID 0~15 확인
 → Torque OFF 연결 진단
 → 현재 자세 유지 Torque 시험
 → 모터별 편 손 영점 기록
@@ -31,49 +31,45 @@
 - LEAP Hand에 5V 전원과 Micro-USB 통신 케이블을 연결합니다.
 - 가능하면 USB 허브와 여러 개의 연장 케이블을 사용하지 않습니다.
 
-### 프로그램
+### 프로그램 (Ubuntu Linux)
 
-PowerShell을 열고 프로젝트 폴더로 이동합니다.
+터미널을 열고 프로젝트 폴더로 이동합니다.
 
-```powershell
-cd "C:\Users\jiwoo\Documents\ChatGPT\LEAP HAND"
+```bash
+cd ~/Desktop/IsaacSim/leap-hand
+source .venv/bin/activate
 ```
 
-가상환경을 활성화하고 필요한 패키지를 설치합니다.
+### 시리얼 포트 권한 및 저지연 설정 (Ubuntu)
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+USB 변환기를 연결한 후 다음을 실행합니다.
+
+```bash
+# 1. 시리얼 포트 쓰기 권한 설정
+sudo chmod 666 /dev/ttyUSB0
+# (또는 sudo usermod -aG dialout $USER 후 재로그인)
+
+# 2. FTDI USB 통신 지연 최소화 (1ms Low-Latency 모드)
+echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
 ```
 
-가상환경 활성화가 차단되면 현재 PowerShell 세션에서만 실행 정책을 변경합니다.
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-## 2. COM 포트와 모터 ID 확인
+## 2. 시리얼 포트와 모터 ID 확인
 
 1. LEAP Hand에 5V 전원을 공급합니다.
-2. Micro-USB 케이블을 노트북에 연결합니다.
-3. DYNAMIXEL Wizard를 실행합니다.
-4. 연결된 COM 포트를 확인합니다. 예: `COM13`
-5. 모터 ID `0~15`가 모두 검색되는지 확인합니다.
-6. 중복 ID와 누락된 ID가 없는지 확인합니다.
-7. 포트를 확인한 뒤 **DYNAMIXEL Wizard를 완전히 종료**합니다.
-
-DYNAMIXEL Wizard가 같은 포트를 사용하고 있으면 Python 프로그램에서 포트를 열 수 없습니다.
+2. Micro-USB 케이블을 컴퓨터에 연결합니다.
+3. 시리얼 포트가 인식되었는지 확인합니다: `ls /dev/ttyUSB*`
+4. DYNAMIXEL Wizard 또는 `leap_hand_hardware_check.py`로 모터 ID `0~15`가 모두 검색되는지 확인합니다.
+5. DYNAMIXEL Wizard를 사용한 경우 **Wizard를 완전히 종료**합니다. (포트 점유 방지)
 
 ## 3. Torque OFF 연결 진단
 
 처음 실행할 때는 `--torque-test`를 절대 추가하지 않습니다.
 
-```powershell
-python leap_hand_hardware_check.py --port COM13
+```bash
+python leap_hand_hardware_check.py --port /dev/ttyUSB0
 ```
 
-`COM13`은 DYNAMIXEL Wizard에서 확인한 실제 포트로 변경합니다.
+`--port` 인자를 생략해도 기본값으로 `/dev/ttyUSB0`이 사용됩니다.
 
 이 명령은 다음 항목만 확인하고 Torque를 켜지 않습니다.
 
@@ -106,12 +102,12 @@ Torque OFF; serial port closed.
 
 손 주변을 비우고 전원 차단 수단을 손이 닿는 위치에 둡니다.
 
-```powershell
-python leap_hand_hardware_check.py `
-  --port COM13 `
-  --current-limit 300 `
-  --watchdog-ms 500 `
-  --torque-test `
+```bash
+python leap_hand_hardware_check.py \
+  --port /dev/ttyUSB0 \
+  --current-limit 300 \
+  --watchdog-ms 500 \
+  --torque-test \
   --hold-seconds 2
 ```
 
@@ -140,8 +136,8 @@ python leap_hand_hardware_check.py `
 
 손을 완전히 편 중립 자세에 놓고, Torque OFF 상태에서 16개 모터의 raw 위치를 기록합니다. 이 값은 이후 프로젝트의 `0°` 명령이 해당 실물 손의 편 자세를 목표로 하게 만드는 모터별 offset입니다.
 
-```powershell
-python leap_hand_motor_calibration.py --port COM13
+```bash
+python leap_hand_motor_calibration.py --port /dev/ttyUSB0
 ```
 
 프로그램은 모터 통신·온도·Hardware Error를 확인한 뒤 다음 입력을 기다립니다.
@@ -160,8 +156,8 @@ calibration/hardware_motors.yaml
 
 이미 저장된 보정을 다시 기록하려면 명시적으로 `--force`를 붙입니다.
 
-```powershell
-python leap_hand_motor_calibration.py --port COM13 --force
+```bash
+python leap_hand_motor_calibration.py --port /dev/ttyUSB0 --force
 ```
 
 생성된 YAML에는 관절별 `motor_id`, `open_motor_radians`, `sign`이 들어 있습니다. `sign`은 처음에 모두 `1`이며, 다음 단일 관절 시험에서 특정 관절이 반대 방향으로 움직일 때만 해당 관절의 값을 `-1`로 바꿉니다.
@@ -176,9 +172,9 @@ joints:
 
 보정 파일을 적용할 때는 아래처럼 `--motor-calibration-file`을 추가합니다.
 
-```powershell
-python leap_hand_hardware_check.py `
-  --port COM13 `
+```bash
+python leap_hand_hardware_check.py \
+  --port /dev/ttyUSB0 \
   --motor-calibration-file calibration/hardware_motors.yaml
 ```
 
@@ -188,13 +184,13 @@ python leap_hand_hardware_check.py `
 
 첫 시험은 검지 PIP 관절, `+5°`, 최대 `30°/s`로 시작합니다.
 
-```powershell
-python leap_hand_joint_test.py `
-  --port COM13 `
-  --joint index_pip_flex `
-  --delta 5 `
-  --max-joint-speed 30 `
-  --current-limit 300 `
+```bash
+python leap_hand_joint_test.py \
+  --port /dev/ttyUSB0 \
+  --joint index_pip_flex \
+  --delta 5 \
+  --max-joint-speed 30 \
+  --current-limit 300 \
   --motor-calibration-file calibration/hardware_motors.yaml
 ```
 
@@ -222,12 +218,12 @@ Torque OFF 상태에서 위치·온도·오류 확인
 
 반대 방향은 음수 delta로 확인합니다.
 
-```powershell
-python leap_hand_joint_test.py `
-  --port COM13 `
-  --joint index_pip_flex `
-  --delta -5 `
-  --max-joint-speed 30 `
+```bash
+python leap_hand_joint_test.py \
+  --port /dev/ttyUSB0 \
+  --joint index_pip_flex \
+  --delta -5 \
+  --max-joint-speed 30 \
   --current-limit 300
 ```
 
@@ -262,7 +258,7 @@ thumb_cmc_side       thumb_cmc_flex       thumb_mcp_flex       thumb_ip_flex
 
 실물 손의 전원과 Torque를 끈 상태에서 웹캠 캘리브레이션을 수행합니다.
 
-```powershell
+```bash
 python webcam_hand_tracking.py --profile jiwoo
 ```
 
@@ -274,7 +270,7 @@ python webcam_hand_tracking.py --profile jiwoo
 
 다른 사람은 별도 프로필을 사용합니다.
 
-```powershell
+```bash
 python webcam_hand_tracking.py --profile tester_name
 ```
 
@@ -282,7 +278,7 @@ python webcam_hand_tracking.py --profile tester_name
 
 실물 teleop 전에 같은 프로필로 MuJoCo 추종을 다시 확인합니다.
 
-```powershell
+```bash
 python webcam_mujoco_teleop.py --profile jiwoo
 ```
 
@@ -333,7 +329,7 @@ python webcam_mujoco_teleop.py --profile jiwoo
 ```text
 새 목표 명령 중단
 → Torque OFF
-→ COM 포트 닫기
+→ 시리얼 포트 닫기
 → 5V 전원 차단
 → USB 케이블 분리
 ```
@@ -352,13 +348,13 @@ Bus Watchdog가 작동하면 Goal Position 등의 목표 레지스터가 일시�
 
 실물 연결 전에 전체 자동 테스트를 실행할 수 있습니다.
 
-```powershell
+```bash
 python -m unittest discover -s tests -v
 ```
 
 명령행 옵션만 확인하려면 다음을 실행합니다.
 
-```powershell
+```bash
 python leap_hand_hardware_check.py --help
 python leap_hand_motor_calibration.py --help
 python leap_hand_joint_test.py --help
@@ -369,3 +365,4 @@ python webcam_hand_tracking.py --help
 
 - [LEAP Hand v1 공식 API 및 하드웨어 설정](https://github.com/leap-hand/LEAP_Hand_API)
 - [ROBOTIS XC330 공식 제어표](https://emanual.robotis.com/docs/en/dxl/x/xc330-m288/)
+

@@ -76,14 +76,14 @@ MediaPipe 영상 창과 MuJoCo 뷰어가 함께 열립니다. 영상 창에서 `
 
 충돌 제한 전후를 비교하는 진단 목적에서만 다음 옵션으로 끌 수 있습니다.
 
-```powershell
-.\.venv\Scripts\python.exe webcam_mujoco_teleop.py --profile jiwoo --no-collision-avoidance
+```bash
+python webcam_mujoco_teleop.py --profile jiwoo --no-collision-avoidance
 ```
 
 기존 웹캠 실행 명령에 `--mujoco`를 추가해도 동일하게 실행할 수 있습니다.
 
-```powershell
-.\.venv\Scripts\python.exe webcam_hand_tracking.py --profile jiwoo --mujoco
+```bash
+python webcam_hand_tracking.py --profile jiwoo --mujoco
 ```
 
 ## 4. LEAP Hand v1 실물 API
@@ -93,41 +93,41 @@ MediaPipe 영상 창과 MuJoCo 뷰어가 함께 열립니다. 영상 창에서 `
 안전을 위해 객체를 생성하거나 `connect()`만 호출해서는 토크가 켜지지 않습니다.
 
 ```text
-connect()       → COM 포트 열기, ID 0~15 확인, Torque OFF
+connect()       → 시리얼 포트 열기, ID 0~15 확인, Torque OFF
 configure()     → current-based position mode, 300mA, PID, 500ms watchdog
 enable_torque() → 현재 위치를 목표값으로 먼저 기록한 뒤 Torque ON
 command_degrees → 공식 관절 범위로 제한한 16개 degree 명령 전송
 close()         → 즉시 Torque OFF 후 포트 닫기
 ```
 
-먼저 토크를 전혀 켜지 않는 연결·센서 점검을 실행합니다. `COM13`은 Dynamixel Wizard에서 확인한 실제 포트로 바꿉니다. Wizard는 점검 전에 종료해야 합니다.
+먼저 토크를 전혀 켜지 않는 연결·센서 점검을 실행합니다. 포트 기본값은 `/dev/ttyUSB0`입니다.
 
-```powershell
-.\.venv\Scripts\python.exe leap_hand_hardware_check.py --port COM13
+```bash
+python leap_hand_hardware_check.py --port /dev/ttyUSB0
 ```
 
 16개 ID, 현재 위치, 온도, 입력 전압과 hardware error가 모두 정상인 것을 확인한 뒤에만 현재 위치 유지 토크 테스트를 수행합니다. 이 테스트는 새로운 자세를 명령하지 않지만, 실행 전 손 주변과 기구 사이에서 사람의 손을 치우고 전원 차단 수단을 준비해야 합니다.
 
-```powershell
-.\.venv\Scripts\python.exe leap_hand_hardware_check.py --port COM13 --torque-test
+```bash
+python leap_hand_hardware_check.py --port /dev/ttyUSB0 --torque-test
 ```
 
 실물 손을 편 중립 자세에 놓고 모터별 영점을 기록하려면, Torque OFF 상태에서 다음을 실행합니다. 기록 파일은 기본적으로 `calibration/hardware_motors.yaml`에 저장되며 개인 장비 데이터이므로 Git에서 제외됩니다.
 
-```powershell
-.\.venv\Scripts\python.exe leap_hand_motor_calibration.py --port COM13
+```bash
+python leap_hand_motor_calibration.py --port /dev/ttyUSB0
 ```
 
 손을 의도한 편 자세로 고정한 뒤 터미널에 정확히 `RECORD`를 입력합니다. 이 과정은 모터를 움직이거나 Torque를 켜지 않습니다. 생성된 파일은 각 관절의 모터 ID, 편 손 raw 위치, 방향(`sign`)을 저장합니다. 방향은 모두 처음에 `1`로 저장되므로, 아래 단일 관절 시험에서 반대 방향으로 움직이는 관절만 `sign: -1`로 수정합니다. 보정 파일을 사용할 때는 점검·시험 명령에 `--motor-calibration-file calibration/hardware_motors.yaml`를 추가합니다.
 
 그다음에는 전체 손이 아니라 관절 하나만 현재 자세에서 기본 `+5°` 이동했다가 원래 자세로 복귀하는 저속 테스트를 수행합니다. 이 스크립트는 최대 전류를 300mA, 이동량을 15°, 속도를 60°/s로 제한하며, 실행 전 터미널에 정확히 `MOVE`를 입력해야 Torque가 켜집니다. 나머지 15개 관절은 시작 위치를 유지합니다.
 
-```powershell
-.\.venv\Scripts\python.exe leap_hand_joint_test.py `
-  --port COM13 `
-  --joint index_pip_flex `
-  --delta 5 `
-  --max-joint-speed 30 `
+```bash
+python leap_hand_joint_test.py \
+  --port /dev/ttyUSB0 \
+  --joint index_pip_flex \
+  --delta 5 \
+  --max-joint-speed 30 \
   --motor-calibration-file calibration/hardware_motors.yaml
 ```
 
@@ -138,7 +138,7 @@ Python API 예시:
 ```python
 from leap_hand_hardware_controller import LeapHandHardwareController
 
-with LeapHandHardwareController("COM13", current_limit_milliamps=300) as hand:
+with LeapHandHardwareController("/dev/ttyUSB0", current_limit_milliamps=300) as hand:
     hand.configure()
     hand.enable_torque()
     hand.command_degrees(safe_angles_degrees)
@@ -152,7 +152,7 @@ with LeapHandHardwareController("COM13", current_limit_milliamps=300) as hand:
 
 ## 5. 실행
 
-```powershell
+```bash
 python webcam_hand_tracking.py
 ```
 
@@ -213,7 +213,7 @@ if record is not None:
 
 전체 자동 테스트:
 
-```powershell
+```bash
 python -m unittest discover -s tests -v
 ```
 
@@ -233,12 +233,12 @@ python -m unittest discover -s tests -v
 
 2점 보정 후에도 전체 굽힘을 조금 강화하거나 줄이고 싶으면 캘리브레이션을 다시 하지 않고 `--flexion-scale`을 조절할 수 있습니다. 기본값은 `1.0`입니다.
 
-```powershell
+```bash
 # 10% 더 굽히기
-.\.venv\Scripts\python.exe webcam_mujoco_teleop.py --profile jiwoo --flexion-scale 1.1
+python webcam_mujoco_teleop.py --profile jiwoo --flexion-scale 1.1
 
 # 10% 덜 굽히기
-.\.venv\Scripts\python.exe webcam_mujoco_teleop.py --profile jiwoo --flexion-scale 0.9
+python webcam_mujoco_teleop.py --profile jiwoo --flexion-scale 0.9
 ```
 
 ## 8. 관절 구조와 16 DoF

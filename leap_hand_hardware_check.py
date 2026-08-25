@@ -15,7 +15,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Safely verify a 16-motor LEAP Hand v1 connection."
     )
-    parser.add_argument("--port", required=True, help="Serial port, e.g. COM13")
+    parser.add_argument(
+        "--port",
+        default="/dev/ttyUSB0",
+        help="Serial port (default: /dev/ttyUSB0)",
+    )
     parser.add_argument("--baudrate", type=int, default=4_000_000)
     parser.add_argument(
         "--current-limit",

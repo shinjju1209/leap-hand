@@ -20,7 +20,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "is held fully open."
         )
     )
-    parser.add_argument("--port", required=True, help="Serial port, e.g. COM13")
+    parser.add_argument(
+        "--port",
+        default="/dev/ttyUSB0",
+        help="Serial port (default: /dev/ttyUSB0)",
+    )
     parser.add_argument("--baudrate", type=int, default=4_000_000)
     parser.add_argument(
         "--output",
