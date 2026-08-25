@@ -54,20 +54,20 @@ controller.step_for(1.0 / 30.0)
 
 오른손 손가락을 검지, 중지, 약지, 엄지 순서로 하나씩 굽혔다 펴는 테스트:
 
-```powershell
+```bash
 python mujoco_finger_test.py
 ```
 
 rock, paper, scissors 자세를 차례로 확인하는 선택적 MuJoCo 미리보기:
 
-```powershell
+```bash
 python -m rps.mujoco_demo
 ```
 
 웹캠의 오른손 동작을 MuJoCo LEAP Hand가 실시간으로 따라 하게 하려면:
 
-```powershell
-.\.venv\Scripts\python.exe webcam_mujoco_teleop.py --profile jiwoo
+```bash
+python webcam_mujoco_teleop.py --profile jiwoo
 ```
 
 MediaPipe 영상 창과 MuJoCo 뷰어가 함께 열립니다. 영상 창에서 `MUJOCO: FOLLOWING RIGHT HAND`가 표시되면 `개인별 가동범위 보정 → One Euro → 데드밴드`를 거친 16개 각도가 매 프레임 MuJoCo 컨트롤러로 전달됩니다. 오른손 모델만 포함되어 있으므로 `Right`로 인식된 손만 제어하고, 손이 없거나 왼손만 보이면 마지막 목표 자세를 유지합니다. 처음 사용하는 프로필은 편 손의 `C` 보정과 완전히 쥔 주먹의 `F` 보정을 차례로 수행합니다. `Q`/`Esc`를 누르거나 MuJoCo 뷰어를 닫으면 통합 실행이 종료됩니다.
@@ -84,6 +84,18 @@ python webcam_mujoco_teleop.py --profile jiwoo --no-collision-avoidance
 
 ```bash
 python webcam_hand_tracking.py --profile jiwoo --mujoco
+```
+
+실시간 실물 LEAP Hand 하드웨어 Teleoperation:
+
+```bash
+python webcam_hardware_teleop.py --profile jiwoo
+```
+
+실물 로봇과 MuJoCo 시뮬레이션을 동시에 실시간 추종하려면:
+
+```bash
+python webcam_hand_tracking.py --profile jiwoo --hardware --mujoco
 ```
 
 ## 4. LEAP Hand v1 실물 API

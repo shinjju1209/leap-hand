@@ -10,6 +10,7 @@ from pathlib import Path
 
 import cv2
 import mediapipe as mp
+import numpy as np
 
 from deadband_filter import AngleDeadband
 from hand_angles import DISPLAY_NAMES, calculate_leap_control_angles
@@ -46,6 +47,7 @@ def parse_args(
     argv: Sequence[str] | None = None,
     *,
     default_mujoco: bool = False,
+    default_hardware: bool = False,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Track hand landmarks from a laptop webcam."
@@ -189,6 +191,65 @@ def parse_args(
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Predict and limit MuJoCo targets that cause hand self-contact",
+    )
+    parser.add_argument(
+        "--hardware",
+        action=argparse.BooleanOptionalAction,
+        default=default_hardware,
+        help="Connect and command physical LEAP Hand v1 hardware via DYNAMIXEL",
+    )
+    parser.add_argument(
+        "--port",
+        default="/dev/ttyUSB0",
+        help="DYNAMIXEL serial port (default: /dev/ttyUSB0)",
+    )
+    parser.add_argument(
+        "--baudrate",
+        type=int,
+        default=4_000_000,
+        help="DYNAMIXEL baudrate (default: 4000000)",
+    )
+    parser.add_argument(
+        "--current-limit",
+        type=int,
+        default=300,
+        help="Hardware goal current limit in mA (default: 300)",
+    )
+    parser.add_argument(
+        "--max-joint-speed",
+        type=float,
+        default=120.0,
+        help="Maximum hardware joint speed in deg/s (default: 120.0)",
+    )
+    parser.add_argument(
+        "--max-tracking-error",
+        type=float,
+        default=25.0,
+        help="Maximum allowable tracking error in deg before emergency stop",
+    )
+    parser.add_argument(
+        "--max-temperature",
+        type=float,
+        default=50.0,
+        help="Maximum motor temperature in C before emergency stop",
+    )
+    parser.add_argument(
+        "--motor-calibration-file",
+        type=Path,
+        default=Path("calibration/hardware_motors.yaml"),
+        help="Hardware motor calibration YAML file",
+    )
+    parser.add_argument(
+        "--tracking-loss-hold-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds to hold pose during brief vision tracking loss",
+    )
+    parser.add_argument(
+        "--tracking-loss-disarm-seconds",
+        type=float,
+        default=0.5,
+        help="Seconds of tracking loss before automatic hardware disarm",
     )
     return parser.parse_args(argv)
 
@@ -405,8 +466,54 @@ def draw_round_status(frame, session: RpsRoundSession) -> None:
         )
 
 
-def main(*, default_mujoco: bool = False) -> None:
-    args = parse_args(default_mujoco=default_mujoco)
+def draw_hardware_status(
+    frame,
+    *,
+    is_armed: bool,
+    error_msg: str | None,
+    max_temp: float,
+    worst_error: float,
+    loss_hold: bool = False,
+) -> None:
+    """Draw live hardware connection, arm state, temperature, and errors."""
+    y = 250
+    if error_msg:
+        color = (0, 0, 255)
+        text = f"HW: {error_msg} | Press A to Reset/Arm"
+    elif is_armed:
+        if loss_hold:
+            color = (0, 180, 255)
+            text = f"HW: ARMED (HOLDING POSE - Tracking Lost) | Temp: {max_temp:.0f}C | [D/Space: Disarm]"
+        else:
+            color = (80, 255, 120)
+            text = f"HW: ARMED (FOLLOWING RIGHT HAND) | Temp: {max_temp:.0f}C | Err: {worst_error:.1f}deg | [D/Space: Disarm]"
+    else:
+        color = (0, 220, 255)
+        text = f"HW: DISARMED (Torque OFF) | Temp: {max_temp:.0f}C | [Press A to Arm]"
+
+    cv2.putText(
+        frame,
+        text,
+        (18, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    default_mujoco: bool = False,
+    default_hardware: bool = False,
+) -> None:
+    args = parse_args(
+        argv,
+        default_mujoco=default_mujoco,
+        default_hardware=default_hardware,
+    )
     if args.deadband < 0.0:
         raise ValueError("--deadband must be zero or greater")
     if args.calibration_seconds <= 0.0:
@@ -430,6 +537,21 @@ def main(*, default_mujoco: bool = False) -> None:
         raise ValueError(
             "--gesture-thumb-extended-min-span must exceed "
             "--gesture-thumb-curled-max-span"
+        )
+    if args.current_limit < 1 or args.current_limit > 550:
+        raise ValueError("--current-limit must be between 1 and 550 mA")
+    if args.max_joint_speed <= 0.0:
+        raise ValueError("--max-joint-speed must be greater than zero")
+    if args.max_tracking_error <= 0.0:
+        raise ValueError("--max-tracking-error must be greater than zero")
+    if args.max_temperature <= 0.0:
+        raise ValueError("--max-temperature must be greater than zero")
+    if args.tracking_loss_hold_seconds < 0.0:
+        raise ValueError("--tracking-loss-hold-seconds must be non-negative")
+    if args.tracking_loss_disarm_seconds <= args.tracking_loss_hold_seconds:
+        raise ValueError(
+            "--tracking-loss-disarm-seconds must exceed "
+            "--tracking-loss-hold-seconds"
         )
 
     base_processing_steps = []
@@ -465,6 +587,16 @@ def main(*, default_mujoco: bool = False) -> None:
 
     mujoco_controller = None
     mujoco_viewer = None
+    hardware_controller = None
+    hardware_armed = False
+    hardware_error_msg: str | None = None
+    last_right_hand_seen_seconds: float | None = None
+    last_hw_command_angles: np.ndarray | None = None
+    hw_max_temperature = 0.0
+    hw_worst_tracking_error = 0.0
+    last_hw_health_check_time = 0.0
+    hw_holding_loss = False
+
     try:
         if args.mujoco:
             from mujoco_hand_controller import MujocoHandController
@@ -472,14 +604,60 @@ def main(*, default_mujoco: bool = False) -> None:
             mujoco_controller = MujocoHandController(args.mujoco_model)
             mujoco_viewer = mujoco_controller.launch_viewer()
 
+        if args.hardware:
+            from leap_hand_hardware_controller import LeapHandHardwareController
+
+            calib_file = (
+                args.motor_calibration_file
+                if args.motor_calibration_file.is_file()
+                else None
+            )
+            if (
+                calib_file is None
+                and str(args.motor_calibration_file)
+                != "calibration/hardware_motors.yaml"
+            ):
+                print(
+                    f"Warning: Calibration file {args.motor_calibration_file} "
+                    "not found; using nominal open-pose calibration.",
+                    flush=True,
+                )
+            hardware_controller = LeapHandHardwareController(
+                args.port,
+                baudrate=args.baudrate,
+                current_limit_milliamps=args.current_limit,
+                max_joint_speed_degrees_per_second=args.max_joint_speed,
+                motor_calibration=calib_file,
+            )
+            models = hardware_controller.connect()
+            print(
+                f"[HARDWARE] Connected on {args.port}. IDs/Models: {models}",
+                flush=True,
+            )
+            hardware_controller.configure()
+            print(
+                "[HARDWARE] Low-current mode configured. Torque is OFF. "
+                "Press 'A' in the GUI window to Arm (enable torque).",
+                flush=True,
+            )
+
         capture = open_camera(args.camera, args.width, args.height)
     except Exception:
         if mujoco_controller is not None:
             mujoco_controller.close()
+        if hardware_controller is not None:
+            hardware_controller.close()
         raise
-    window_name = "MediaPipe + MuJoCo Teleoperation" if args.mujoco else (
-        "MediaPipe Hand Tracking - C/F calibrate | Q/ESC quit"
-    )
+    if args.hardware and args.mujoco:
+        window_name = "MediaPipe + Hardware + MuJoCo Teleoperation"
+    elif args.hardware:
+        window_name = (
+            "MediaPipe + LEAP Hand Hardware - A: Arm | D/Space: Disarm | Q: Quit"
+        )
+    elif args.mujoco:
+        window_name = "MediaPipe + MuJoCo Teleoperation"
+    else:
+        window_name = "MediaPipe Hand Tracking - C/F calibrate | Q/ESC quit"
     previous_frame_time = time.perf_counter()
     smoothed_fps = 0.0
     last_timestamp_ms = -1
@@ -648,19 +826,42 @@ def main(*, default_mujoco: bool = False) -> None:
                         else:
                             command_angles = filtered_angles
 
-                        if mujoco_controller is not None and hand_label == "Right":
-                            if args.collision_avoidance:
-                                command_angles = (
-                                    mujoco_controller.set_collision_safe_target_degrees(
-                                        command_angles,
+                        if hand_label == "Right":
+                            if mujoco_controller is not None:
+                                if args.collision_avoidance:
+                                    command_angles = (
+                                        mujoco_controller.set_collision_safe_target_degrees(
+                                            command_angles,
+                                        )
                                     )
-                                )
-                                mujoco_collision_scale = (
-                                    mujoco_controller.last_collision_scale
-                                )
-                            else:
-                                mujoco_controller.set_target_degrees(command_angles)
-                            mujoco_command_sent = True
+                                    mujoco_collision_scale = (
+                                        mujoco_controller.last_collision_scale
+                                    )
+                                else:
+                                    mujoco_controller.set_target_degrees(command_angles)
+                                mujoco_command_sent = True
+
+                            if hardware_controller is not None:
+                                last_right_hand_seen_seconds = timestamp_seconds
+                                hw_holding_loss = False
+                                if (
+                                    hardware_armed
+                                    and hardware_error_msg is None
+                                ):
+                                    try:
+                                        last_hw_command_angles = (
+                                            hardware_controller.command_degrees(
+                                                command_angles
+                                            )
+                                        )
+                                    except Exception as exc:
+                                        hardware_controller.emergency_stop()
+                                        hardware_armed = False
+                                        hardware_error_msg = f"COMM ERROR: {exc}"
+                                        print(
+                                            f"[HARDWARE ERROR] {exc}",
+                                            flush=True,
+                                        )
 
                         processing_steps = []
                         if (
@@ -698,6 +899,114 @@ def main(*, default_mujoco: bool = False) -> None:
                     mujoco_controller.step_for(simulation_duration)
                     mujoco_controller.sync_viewer()
                     last_simulation_time = now
+
+                if hardware_controller is not None:
+                    if (
+                        hardware_armed
+                        and "Right" not in visible_hand_labels
+                        and hardware_error_msg is None
+                    ):
+                        if last_right_hand_seen_seconds is not None:
+                            loss_duration = (
+                                timestamp_seconds - last_right_hand_seen_seconds
+                            )
+                            if loss_duration <= args.tracking_loss_hold_seconds:
+                                hw_holding_loss = True
+                                try:
+                                    hardware_controller.heartbeat()
+                                except Exception as exc:
+                                    hardware_controller.emergency_stop()
+                                    hardware_armed = False
+                                    hardware_error_msg = f"HEARTBEAT ERROR: {exc}"
+                            elif loss_duration > args.tracking_loss_disarm_seconds:
+                                hardware_controller.emergency_stop()
+                                hardware_armed = False
+                                hw_holding_loss = False
+                                hardware_error_msg = (
+                                    f"TRACKING LOSS TIMEOUT ({loss_duration:.1f}s) "
+                                    "- AUTO DISARMED"
+                                )
+                                print(
+                                    f"[HARDWARE SAFETY] Tracking lost for "
+                                    f"{loss_duration:.1f}s: Auto-disarmed torque.",
+                                    flush=True,
+                                )
+                            else:
+                                hw_holding_loss = True
+                        else:
+                            hw_holding_loss = False
+
+                    if now - last_hw_health_check_time >= 0.1:
+                        last_hw_health_check_time = now
+                        if hardware_error_msg is None:
+                            try:
+                                health = hardware_controller.read_health()
+                                hw_max_temperature = float(
+                                    np.max(health.temperatures_celsius)
+                                )
+                                if np.any(health.hardware_errors != 0):
+                                    err_ids = np.flatnonzero(
+                                        health.hardware_errors
+                                    ).tolist()
+                                    hardware_controller.emergency_stop()
+                                    hardware_armed = False
+                                    hardware_error_msg = (
+                                        f"HARDWARE ERROR ON MOTOR {err_ids}"
+                                    )
+                                    print(
+                                        f"[HARDWARE ERROR] Motor hardware errors: "
+                                        f"{err_ids}",
+                                        flush=True,
+                                    )
+                                elif hw_max_temperature >= args.max_temperature:
+                                    hardware_controller.emergency_stop()
+                                    hardware_armed = False
+                                    hardware_error_msg = (
+                                        f"OVERHEAT ({hw_max_temperature:.1f}C >= "
+                                        f"{args.max_temperature:.1f}C)"
+                                    )
+                                    print(
+                                        f"[HARDWARE ERROR] Overheat limit reached: "
+                                        f"{hw_max_temperature:.1f}C",
+                                        flush=True,
+                                    )
+
+                                if (
+                                    hardware_armed
+                                    and last_hw_command_angles is not None
+                                ):
+                                    fb = hardware_controller.read_feedback()
+                                    errs = np.abs(
+                                        fb.positions_degrees
+                                        - last_hw_command_angles
+                                    )
+                                    hw_worst_tracking_error = float(
+                                        np.max(errs)
+                                    )
+                                    if (
+                                        hw_worst_tracking_error
+                                        > args.max_tracking_error
+                                    ):
+                                        hardware_controller.emergency_stop()
+                                        hardware_armed = False
+                                        hardware_error_msg = (
+                                            f"TRACKING ERROR "
+                                            f"({hw_worst_tracking_error:.1f}deg > "
+                                            f"{args.max_tracking_error:.1f}deg)"
+                                        )
+                                        print(
+                                            f"[HARDWARE ERROR] Tracking error limit "
+                                            f"exceeded: {hw_worst_tracking_error:.1f}deg",
+                                            flush=True,
+                                        )
+                            except Exception as exc:
+                                hardware_controller.emergency_stop()
+                                hardware_armed = False
+                                hardware_error_msg = f"STATUS READ ERROR: {exc}"
+                                print(
+                                    f"[HARDWARE ERROR] Status read failed: {exc}",
+                                    flush=True,
+                                )
 
                 instantaneous_fps = 1.0 / max(now - previous_frame_time, 1e-6)
                 previous_frame_time = now
@@ -759,6 +1068,16 @@ def main(*, default_mujoco: bool = False) -> None:
                 )
                 draw_round_status(frame, round_session)
 
+                if args.hardware:
+                    draw_hardware_status(
+                        frame,
+                        is_armed=hardware_armed,
+                        error_msg=hardware_error_msg,
+                        max_temp=hw_max_temperature,
+                        worst_error=hw_worst_tracking_error,
+                        loss_hold=hw_holding_loss,
+                    )
+
                 if neutral_calibration.is_collecting:
                     progress = neutral_calibration.progress(timestamp_seconds)
                     pose_instruction = (
@@ -787,6 +1106,29 @@ def main(*, default_mujoco: bool = False) -> None:
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q"), 27):
                     break
+                if key in (ord("a"), ord("A")):
+                    if hardware_controller is not None:
+                        if not hardware_armed:
+                            try:
+                                hardware_controller.enable_torque()
+                                hardware_armed = True
+                                hardware_error_msg = None
+                                last_right_hand_seen_seconds = timestamp_seconds
+                                print(
+                                    "[HARDWARE] Torque ENABLED. Following right hand. "
+                                    "(Press D or Space to Disarm)",
+                                    flush=True,
+                                )
+                            except Exception as exc:
+                                hardware_controller.emergency_stop()
+                                hardware_armed = False
+                                hardware_error_msg = f"ARM FAILED: {exc}"
+                                print(f"[HARDWARE ERROR] Arm failed: {exc}", flush=True)
+                if key in (ord("d"), ord("D"), ord(" ")):
+                    if hardware_controller is not None and hardware_armed:
+                        hardware_controller.emergency_stop()
+                        hardware_armed = False
+                        print("[HARDWARE] DISARMED. Torque is OFF.", flush=True)
                 robot_move_keys = {
                     ord("1"): "rock",
                     ord("2"): "paper",
@@ -845,6 +1187,19 @@ def main(*, default_mujoco: bool = False) -> None:
         cv2.destroyAllWindows()
         if mujoco_controller is not None:
             mujoco_controller.close()
+        if hardware_controller is not None:
+            shutdown_fails = hardware_controller.close()
+            if shutdown_fails:
+                print(
+                    f"WARNING: Torque-off not acknowledged by IDs: "
+                    f"{list(shutdown_fails)}. Cut 5V power!",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Hardware Torque OFF; serial port closed cleanly.",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

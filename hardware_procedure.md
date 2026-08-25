@@ -290,37 +290,43 @@ python webcam_mujoco_teleop.py --profile jiwoo
 - 가위와 주먹 자세에서 자기충돌 제한이 갑자기 손 전체를 펴지 않음
 - 손을 카메라에서 치웠을 때 오래된 필터 상태가 초기화됨
 
-## 9. 실물 teleop 전 필수 구현 상태
+## 9. 실시간 실물 하드웨어 Teleoperation
 
-현재 저장소에는 다음 기능이 구현되어 있습니다.
+1~8단계를 통해 통신 진단, 토크 시험, 편 손 영점 보정, 단일 관절 저속 시험, 사람 손 캘리브레이션을 모두 마쳤다면 실시간 실물 제어를 시작합니다.
 
-- 실물 연결 및 Torque OFF 진단
-- 현재 위치 유지 Torque 시험
-- 단일 관절 상대각 저속 시험
-- 관절 범위 제한
-- 관절 속도 제한
-- 500ms DYNAMIXEL Bus Watchdog
-- 위치·속도·전류 피드백 읽기
-- 온도·전압·Hardware Error 읽기
-- 예외 발생 시 Torque OFF 요청
-
-그러나 웹캠의 최종 관절각을 실물 모터로 보내는 실시간 teleop 실행 파일은 아직 만들지 않았습니다. 다음 기능이 구현되고 검증되기 전에는 `webcam_hand_tracking.py`의 `command_angles`를 실물 컨트롤러에 직접 연결하지 않습니다.
-
-- 명시적인 ARM 키와 비상 정지 키
-- 카메라 추적 손실 시간에 따른 Hold 및 Torque OFF
-- 고정 주기 50~100Hz 모터 명령 루프
-- 가장 최신 비전 목표만 사용하는 latest-wins 구조
-- 실제 관절 위치와 명령 위치 차이의 연속 감시
-- 전류·온도·Hardware Error의 실행 중 감시
-- 통신 예외 또는 뷰어 종료 시 확실한 Torque OFF
-
-권장 추적 손실 정책은 다음과 같습니다.
-
-```text
-0~200ms 손실     마지막 안전 목표 유지
-200~500ms 손실   새 목표 전송 중단
-500ms 이상       Torque OFF
+```bash
+# 기본 실행 (보정 파일 calibration/hardware_motors.yaml 자동 로드)
+python webcam_hardware_teleop.py --profile jiwoo
 ```
+
+MuJoCo 시뮬레이션 창과 실물 로봇을 동시에 띄워 함께 제어하려면 다음을 실행합니다.
+
+```bash
+python webcam_hand_tracking.py --profile jiwoo --hardware --mujoco
+```
+
+### 🎛️ 실시간 조작 키 (GUI 창 활성화 상태)
+
+| 키 | 기능 | 설명 |
+|---|---|---|
+| **`A`** | **ARM (토크 활성화)** | 현재 모터 위치를 초기 목표로 안전하게 토크를 켜고, 인식된 사람 오른손 추종 시작 |
+| **`D` / `Space`** | **DISARM (비상 정지 / 토크 해제)** | 즉시 16개 모터의 Torque를 OFF하고 추종을 중단합니다. |
+| **`Q` / `Esc`** | **종료** | 안전하게 Torque를 OFF하고 시리얼 포트를 닫은 뒤 프로그램을 종료합니다. |
+| **`1` / `2` / `3`** | **RPS 라운드 시작** | 로봇의 가위바위보 목표(1: 주먹, 2: 보, 3: 가위) 라운드를 시작합니다. |
+| **`C` / `F`** | **캘리브레이션** | `C`: 편 손 중립 보정 수집 / `F`: 주먹 쥔 가동범위 보정 수집 |
+
+### 🛡️ 내장 안전 시스템 동작 원리
+
+1. **초기 안전 모드 (DISARMED)**: 프로그램이 실행되어도 처음에는 Torque가 켜지지 않으며, 화면에 노란색 `HW: DISARMED`가 표시됩니다. 손과 로봇이 준비되었을 때 `A` 키를 눌러야만 토크가 켜집니다.
+2. **시작 시 튐 방지 (Smooth Seeding)**: `A`를 누르는 순간 현재 모터의 실제 위치를 먼저 읽어 Goal Position으로 지정한 뒤 토크를 켜므로 손가락이 튀지 않습니다.
+3. **추적 손실 자동 대응 (Tracking Loss Fail-Safe)**:
+   - **0 ~ 200ms 손실**: 통신 유지를 위해 마지막 안전 자세 유지 (Heartbeat 유지)
+   - **200 ~ 500ms 손실**: 화면에 `HOLDING POSE` 경고 표시 및 새 명령 차단
+   - **500ms 이상 손실**: **자동으로 Torque OFF (Auto-Disarm)** 되어 시야에서 손이 사라져도 로봇이 오작동하지 않습니다.
+4. **실시간 이상 감시 및 긴급 정지 (100ms 주기)**:
+   - **모터 과열 감시**: 어느 모터든 50°C 이상 도달 시 즉시 Torque OFF (`OVERHEAT`)
+   - **하드웨어 오류 감시**: DYNAMIXEL Hardware Error 플래그 감지 시 즉시 Torque OFF
+   - **위치 추종 오차 감시**: 명령 위치와 실제 엔코더 위치 오차가 25° 초과 시(외부 외력에 의한 걸림 등) 즉시 Torque OFF (`TRACKING ERROR`)
 
 ## 10. 정상 종료 및 비상 정지
 
