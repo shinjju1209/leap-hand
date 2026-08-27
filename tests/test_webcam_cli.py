@@ -32,12 +32,12 @@ class WebcamCliTests(unittest.TestCase):
         self.assertTrue(args.hardware)
         self.assertEqual(args.port, "/dev/ttyUSB0")
         self.assertEqual(args.baudrate, 4_000_000)
-        self.assertEqual(args.current_limit, 300)
-        self.assertEqual(args.max_joint_speed, 120.0)
-        self.assertEqual(args.max_tracking_error, 25.0)
+        self.assertEqual(args.current_limit, 350)
+        self.assertEqual(args.max_joint_speed, 350.0)
+        self.assertEqual(args.max_tracking_error, 50.0)
         self.assertEqual(args.max_temperature, 50.0)
-        self.assertEqual(args.tracking_loss_hold_seconds, 0.2)
-        self.assertEqual(args.tracking_loss_disarm_seconds, 0.5)
+        self.assertEqual(args.tracking_loss_hold_seconds, 1.0)
+        self.assertEqual(args.tracking_loss_disarm_seconds, 3.0)
 
     def test_hardware_default_can_be_overridden(self):
         args = parse_args(["--no-hardware"], default_hardware=True)

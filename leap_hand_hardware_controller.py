@@ -121,9 +121,9 @@ class LeapHandHardwareController:
         baudrate: int = DEFAULT_BAUDRATE,
         motor_ids: Sequence[int] | None = None,
         current_limit_milliamps: int = 300,
-        position_p_gain: int = 600,
+        position_p_gain: int = 450,
         position_i_gain: int = 0,
-        position_d_gain: int = 200,
+        position_d_gain: int = 1200,
         side_gain_scale: float = 0.75,
         bus_watchdog_milliseconds: int = 500,
         max_joint_speed_degrees_per_second: float = 120.0,
@@ -375,13 +375,21 @@ class LeapHandHardwareController:
             raise RuntimeError("Torque is disabled; there is no active goal")
         self._sync_write_motor_radians(self._last_goal_motor_radians)
 
-    def read_feedback(self) -> LeapHandFeedback:
-        """Read synchronized position, velocity, and current feedback."""
+    def read_feedback(self, max_retries: int = 2) -> LeapHandFeedback:
+        """Read synchronized position, velocity, and current feedback with retry."""
         self._require_connected()
         if self._feedback_reader is None:
             raise RuntimeError("Feedback reader is not initialized")
-        comm_result = self._feedback_reader.txRxPacket()
-        self._check_communication(comm_result, operation="feedback sync read")
+        last_error = None
+        for attempt in range(max_retries + 1):
+            comm_result = self._feedback_reader.txRxPacket()
+            if comm_result == self._sdk.COMM_SUCCESS:
+                break
+            detail = self._packet_handler.getTxRxResult(comm_result)
+            last_error = OSError(f"feedback sync read failed for ID None: {detail}")
+        else:
+            if last_error is not None:
+                raise last_error
 
         motor_positions = np.zeros(16, dtype=np.float64)
         velocities = np.zeros(16, dtype=np.float64)
@@ -556,22 +564,25 @@ class LeapHandHardwareController:
         size: int,
         *,
         signed: bool = False,
+        max_retries: int = 2,
     ) -> int:
         self._require_connected()
         method = getattr(self._packet_handler, f"read{size}ByteTxRx")
-        value, comm_result, dxl_error = method(
-            self._port_handler,
-            motor_id,
-            address,
-        )
-        self._check_communication(
-            comm_result,
-            dxl_error,
-            motor_id,
-            f"read address {address}",
-        )
-        integer = int(value)
-        return _unsigned_to_signed(integer, size) if signed else integer
+        last_error = None
+        for attempt in range(max_retries + 1):
+            value, comm_result, dxl_error = method(
+                self._port_handler,
+                motor_id,
+                address,
+            )
+            if comm_result == self._sdk.COMM_SUCCESS and not dxl_error:
+                integer = int(value)
+                return _unsigned_to_signed(integer, size) if signed else integer
+            detail = self._packet_handler.getTxRxResult(comm_result)
+            last_error = OSError(f"read address {address} failed for ID {motor_id}: {detail}")
+        if last_error is not None:
+            raise last_error
+        return 0
 
     def _check_communication(
         self,

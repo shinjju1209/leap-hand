@@ -292,3 +292,38 @@ MCP side + MCP flex + PIP flex + DIP flex = 손가락당 4 DoF
 | 합계 |  | 16 |
 
 이 프로젝트에서는 모든 굽힘각이 `0°`에 가까운 상태를 손을 편 중립 자세로 사용합니다. `MCP side`와 `CMC side`의 `0°`는 좌우로 기울지 않은 중앙 자세를 뜻합니다.
+
+## 9. Sim-to-Real 강화학습(RL) Policy 배포
+
+Isaac Gym / Orbit / SAPIEN 등에서 학습된 Pre-trained In-Hand Manipulation Policy(예: 주사위/큐브 축 회전)를 MuJoCo 시뮬레이션 및 LEAP Hand 실물에 배포합니다.
+
+### 1) 실행 명령
+
+```bash
+# 1. MuJoCo 시뮬레이션 환경에서 Policy 실행 (더미/테스트 또는 모델 파일 지정)
+python rl_sim2real_deploy.py --mode mujoco --policy models/cube_rotation.pt
+
+# 2. 실물 하드웨어 단독 배포
+python rl_sim2real_deploy.py --mode hardware --policy models/cube_rotation.pt --port /dev/ttyUSB0
+
+# 3. 실물 하드웨어 + MuJoCo 시뮬레이터 동시 실행 (Digital Twin 모드)
+python rl_sim2real_deploy.py --mode both --policy models/cube_rotation.pt
+```
+
+### 2) 조작 단축키 (GUI 창)
+
+| 키 | 기능 | 설명 |
+|---|---|---|
+| **`A`** | **ARM (Policy 실행 시작)** | 초기 파지 자세로 이동 후 실시간 Policy 추론 및 제어 시작 |
+| **`D` / `Space`** | **DISARM (비상 정지)** | Policy 제어 중단 및 하드웨어 토크 즉시 해제 |
+| **`R`** | **RESET** | 기본 조작 파지 자세(Default Grasp Pose)로 손가락 정렬 |
+| **`1` / `2`** | **회전 방향 전환** | `1`: 반시계(+1.0), `2`: 시계(-1.0) 방향 명령 전송 |
+| **`Q` / `Esc`** | **종료** | 안전하게 Disarm 및 포트 종료 |
+
+### 3) 주요 옵션
+
+- `--config configs/inhand_cube_rotation.yaml`: 기본 파지 자세 및 제어 파라미터 YAML 파일
+- `--control-hz 20.0`: Policy 추론 및 제어 루프 주기 (기본 20Hz)
+- `--action-scale 0.1`: Action $\to$ Radian 변환 스케일 ($q_{\text{target}} = q_{\text{default}} + \text{scale} \times a$)
+- `--ema-alpha 0.8`: Sim-to-Real 떨림 방지를 위한 Action 지수이동평균(EMA) 필터 계수
+- `--current-limit 350`: 파지/조작용 전류 제한 (mA)

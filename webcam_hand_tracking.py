@@ -88,8 +88,8 @@ def parse_args(
     )
     parser.add_argument(
         "--profile",
-        default="default",
-        help="Person name used to select a neutral-calibration profile",
+        default="jiwoo",
+        help="Person name used to select a neutral-calibration profile (default: jiwoo)",
     )
     parser.add_argument(
         "--calibration-file",
@@ -212,20 +212,20 @@ def parse_args(
     parser.add_argument(
         "--current-limit",
         type=int,
-        default=300,
-        help="Hardware goal current limit in mA (default: 300)",
+        default=350,
+        help="Hardware goal current limit in mA (default: 350)",
     )
     parser.add_argument(
         "--max-joint-speed",
         type=float,
-        default=120.0,
-        help="Maximum hardware joint speed in deg/s (default: 120.0)",
+        default=350.0,
+        help="Maximum hardware joint speed in deg/s (default: 350.0)",
     )
     parser.add_argument(
         "--max-tracking-error",
         type=float,
-        default=25.0,
-        help="Maximum allowable tracking error in deg before emergency stop",
+        default=50.0,
+        help="Maximum allowable tracking error in deg before emergency stop (default: 50.0)",
     )
     parser.add_argument(
         "--max-temperature",
@@ -242,14 +242,14 @@ def parse_args(
     parser.add_argument(
         "--tracking-loss-hold-seconds",
         type=float,
-        default=0.2,
-        help="Seconds to hold pose during brief vision tracking loss",
+        default=1.0,
+        help="Seconds to hold pose during brief vision tracking loss (default: 1.0s)",
     )
     parser.add_argument(
         "--tracking-loss-disarm-seconds",
         type=float,
-        default=0.5,
-        help="Seconds of tracking loss before automatic hardware disarm",
+        default=3.0,
+        help="Seconds of tracking loss before automatic hardware disarm (default: 3.0s)",
     )
     return parser.parse_args(argv)
 
@@ -669,6 +669,8 @@ def main(
         round_session.start_round(args.robot_move)
     last_hand_seen_seconds: float | None = None
     last_simulation_time = time.perf_counter()
+    hw_consecutive_write_errors = 0
+    hw_consecutive_read_errors = 0
 
     try:
         with mp.tasks.vision.HandLandmarker.create_from_options(options) as landmarker:
@@ -854,14 +856,22 @@ def main(
                                                 command_angles
                                             )
                                         )
+                                        hw_consecutive_write_errors = 0
                                     except Exception as exc:
-                                        hardware_controller.emergency_stop()
-                                        hardware_armed = False
-                                        hardware_error_msg = f"COMM ERROR: {exc}"
-                                        print(
-                                            f"[HARDWARE ERROR] {exc}",
-                                            flush=True,
-                                        )
+                                        hw_consecutive_write_errors += 1
+                                        if hw_consecutive_write_errors >= 3:
+                                            hardware_controller.emergency_stop()
+                                            hardware_armed = False
+                                            hardware_error_msg = f"COMM ERROR: {exc}"
+                                            print(
+                                                f"[HARDWARE ERROR] Comm write failed 3 consecutive times: {exc}",
+                                                flush=True,
+                                            )
+                                        else:
+                                            print(
+                                                f"[HARDWARE WARNING] Transient comm write error (attempt {hw_consecutive_write_errors}/3): {exc}",
+                                                flush=True,
+                                            )
 
                         processing_steps = []
                         if (
@@ -999,14 +1009,22 @@ def main(
                                             f"exceeded: {hw_worst_tracking_error:.1f}deg",
                                             flush=True,
                                         )
+                                hw_consecutive_read_errors = 0
                             except Exception as exc:
-                                hardware_controller.emergency_stop()
-                                hardware_armed = False
-                                hardware_error_msg = f"STATUS READ ERROR: {exc}"
-                                print(
-                                    f"[HARDWARE ERROR] Status read failed: {exc}",
-                                    flush=True,
-                                )
+                                hw_consecutive_read_errors += 1
+                                if hw_consecutive_read_errors >= 3:
+                                    hardware_controller.emergency_stop()
+                                    hardware_armed = False
+                                    hardware_error_msg = f"STATUS READ ERROR: {exc}"
+                                    print(
+                                        f"[HARDWARE ERROR] Status read failed 3 consecutive times: {exc}",
+                                        flush=True,
+                                    )
+                                else:
+                                    print(
+                                        f"[HARDWARE WARNING] Transient status read error (attempt {hw_consecutive_read_errors}/3): {exc}",
+                                        flush=True,
+                                    )
 
                 instantaneous_fps = 1.0 / max(now - previous_frame_time, 1e-6)
                 previous_frame_time = now

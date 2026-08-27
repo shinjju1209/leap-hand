@@ -1,0 +1,41 @@
+# In-Hand Cube / Dice Rotation Policy Configuration Preset for LEAP Hand v1
+task_name: "inhand_cube_rotation"
+
+control:
+  control_hz: 20.0             # Policy inference & control loop frequency (Hz)
+  action_scale: 0.05           # Action multiplier in radians (official LEAP_Hand_Sim uses 1/24 ~ 0.042)
+  ema_alpha: 0.8               # Action smoothing factor (1.0 = no filter, 0.2~0.8 = smooth)
+  history_length: 3            # Number of observation steps to stack in history buffer
+  target_axis: 1.0             # Default rotation direction (+1.0: counter-clockwise, -1.0: clockwise)
+
+policy:
+  checkpoint: "models/LeapHand.pth"
+
+hardware:
+  port: "/dev/ttyUSB0"
+  current_limit_milliamps: 350 # Safe manipulation current limit (300~450 mA)
+  max_joint_speed: 120.0       # Max joint velocity in degrees/second
+  max_tracking_error: 25.0     # Max allowed tracking error in degrees before E-Stop
+
+# Default In-Hand Manipulation Grasp Pose (in radians, relative to open hand)
+# Order: [index_mcp_side, index_mcp_flex, index_pip_flex, index_dip_flex,
+#         middle_mcp_side, middle_mcp_flex, middle_pip_flex, middle_dip_flex,
+#         ring_mcp_side, ring_mcp_flex, ring_pip_flex, ring_dip_flex,
+#         thumb_cmc_side, thumb_cmc_flex, thumb_mcp_flex, thumb_ip_flex]
+default_joint_pose_radians:
+  - 0.0   # index_mcp_side
+  - 0.8   # index_mcp_flex
+  - 0.8   # index_pip_flex
+  - 0.4   # index_dip_flex
+  - 0.0   # middle_mcp_side
+  - 0.8   # middle_mcp_flex
+  - 0.8   # middle_pip_flex
+  - 0.4   # middle_dip_flex
+  - 0.0   # ring_mcp_side
+  - 0.8   # ring_mcp_flex
+  - 0.8   # ring_pip_flex
+  - 0.4   # ring_dip_flex
+  - 1.2   # thumb_cmc_side (spread to face fingers)
+  - 0.5   # thumb_cmc_flex
+  - 0.5   # thumb_mcp_flex
+  - 0.5   # thumb_ip_flex
