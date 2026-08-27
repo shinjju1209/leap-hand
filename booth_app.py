@@ -1087,6 +1087,11 @@ class BoothKioskApp:
                 elif self.current_screen == AppScreen.RPS:
                     self.update_rps_frame(frame, landmarks_list)
 
+                # Continuously step physics towards the target joint angles
+                if self.mujoco_controller is not None:
+                    self.mujoco_controller.step_for(0.02)
+                    self.mujoco_controller.sync_viewer()
+
                 canvas = self.render(frame, landmarks_list)
                 cv2.imshow(self.window_name, canvas)
 
