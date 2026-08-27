@@ -1054,12 +1054,47 @@ class BoothKioskApp:
         cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BG, -1)
         cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BORDER, 2)
 
-        if camera_frame is not None:
-            resized = cv2.resize(camera_frame, (vw - 8, vh - 8))
-            canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
+        # In Showcase mode, render MuJoCo 3D digital twin hand directly into the viewport
+        sim_frame = None
+        if self.mujoco_controller is not None:
+            try:
+                sim_frame = self.mujoco_controller.render_bgr(480, 640)
+            except Exception:
+                sim_frame = None
 
-        cv2.rectangle(canvas, (vx + 20, vy + 20), (vx + 450, vy + 65), (20, 20, 20), -1)
-        cv2.putText(canvas, "Gesture Showcase (One-Click Demo)", (vx + 30, vy + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_SUCCESS, 2, cv2.LINE_AA)
+        display_frame = sim_frame if sim_frame is not None else camera_frame
+
+        if display_frame is not None:
+            resized = cv2.resize(display_frame, (vw - 8, vh - 8))
+            canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
+        else:
+            cv2.putText(
+                canvas,
+                "No 3D Simulation Stream Available",
+                (vx + 180, vy + 270),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                COLOR_TEXT_MUTED,
+                2,
+                cv2.LINE_AA,
+            )
+
+        badge_text = (
+            "3D Robot Simulation (Digital Twin)"
+            if sim_frame is not None
+            else "Camera View"
+        )
+        cv2.rectangle(canvas, (vx + 20, vy + 20), (vx + 380, vy + 55), (20, 20, 20), -1)
+        cv2.putText(
+            canvas,
+            badge_text,
+            (vx + 30, vy + 44),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            COLOR_PRIMARY if sim_frame is not None else COLOR_SUCCESS,
+            2,
+            cv2.LINE_AA,
+        )
 
     def run(self) -> int:
         """Main application loop."""

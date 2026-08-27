@@ -292,6 +292,21 @@ class MujocoHandController:
             self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
         return self._viewer
 
+    def render_bgr(
+        self,
+        height: int = 480,
+        width: int = 640,
+        camera_id: int = -1,
+    ) -> np.ndarray:
+        """Render the current 3D hand scene to a BGR numpy image."""
+        if not hasattr(self, "_renderer") or self._renderer is None:
+            self._renderer = mujoco.Renderer(self.model, height=height, width=width)
+        self._renderer.update_scene(self.data, camera=camera_id)
+        rgb = self._renderer.render()
+        import cv2
+
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
     def sync_viewer(self) -> None:
         """Refresh the viewer if it has been launched and remains open."""
         if self._viewer is not None and self._viewer.is_running():
