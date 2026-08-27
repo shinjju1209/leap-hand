@@ -327,3 +327,30 @@ python rl_sim2real_deploy.py --mode both --policy models/cube_rotation.pt
 - `--action-scale 0.1`: Action $\to$ Radian 변환 스케일 ($q_{\text{target}} = q_{\text{default}} + \text{scale} \times a$)
 - `--ema-alpha 0.8`: Sim-to-Real 떨림 방지를 위한 Action 지수이동평균(EMA) 필터 계수
 - `--current-limit 350`: 파지/조작용 전류 제한 (mA)
+
+## 10. 전시회 및 부스 운영용 종합 키오스크 UI (`booth_app.py`)
+
+관람객 체험 및 전시회 시연을 위한 원터치 터치스크린/키보드 지원 종합 키오스크 애플리케이션입니다.
+
+### 1) 실행 방법
+
+```bash
+# 1. 시뮬레이션 모드 (하드웨어 없이 웹캠과 MuJoCo로 시연)
+python booth_app.py --mode mujoco
+
+# 2. 실물 하드웨어 연동 부스 운영
+python booth_app.py --mode hardware --port /dev/ttyUSB0
+
+# 3. 실물 하드웨어 + MuJoCo 3D 디지털 트윈 동시 실행
+python booth_app.py --mode both --port /dev/ttyUSB0
+```
+
+### 2) 지원 모드 및 기능
+
+| 모드 | 주요 기능 | 지원 단축키 |
+|---|---|---|
+| **메인 홈 (Home)** | 3개 서브 모드 카드 선택 및 전체 시스템 상태 확인 | `1` (텔레옵), `2` (RPS), `3` (쇼케이스), `Q` (종료) |
+| **🖐️ 텔레오퍼레이션** | 웹캠 실시간 1:1 손 추적, 스켈레톤 시각화, 원유로 떨림 필터링 | `C` (편 손 보정), `F` (주먹 보정), `A` (Arm/추적 시작), `D`/`Space` (Disarm), `R` (보정 리셋), `H` (홈) |
+| **✂️ 가위바위보 대결** | **3-2-1 대형 카운트다운**, 로봇 무작위 수 출력, 관람객 손 제스처 실시간 인식, 승/패/무 판정, 스코어보드 통계 | `Space` (라운드 시작), `P` (연속 자동 대결 ON/OFF), `R` (점수 초기화), `H` (홈) |
+| **🎭 제스처 쇼케이스** | 가위/바위/보/중지 펴기(🖕)/편 손 등 주요 제스처 원클릭 시연 | `1` (바위), `2` (보), `3` (가위), `4` (중지), `5` (편 손), `H` (홈) |
+
