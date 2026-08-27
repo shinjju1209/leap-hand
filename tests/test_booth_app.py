@@ -180,6 +180,46 @@ class BoothAppTests(unittest.TestCase):
             self.assertEqual(canvas.shape, (720, 1280, 3))
             self.assertGreater(np.count_nonzero(canvas), 0)
 
+    @patch("booth_app.MujocoHandController")
+    @patch("booth_app.LeapHandHardwareController")
+    def test_showcase_postures_and_animations(
+        self,
+        mock_hw: MagicMock,
+        mock_mj: MagicMock,
+    ) -> None:
+        app = BoothKioskApp(
+            enable_mujoco=False,
+            enable_hardware=False,
+        )
+        app.current_screen = AppScreen.SHOWCASE
+
+        # Test static postures
+        for action_id in (
+            "showcase_rock",
+            "showcase_paper",
+            "showcase_scissors",
+            "showcase_neutral",
+            "showcase_middle",
+            "showcase_thumbs_up",
+            "showcase_ok",
+            "showcase_pointing",
+            "showcase_rock_on",
+        ):
+            app.handle_action(action_id)
+            self.assertEqual(len(app.target_joint_angles), 16)
+            self.assertIsNone(app.active_animation)
+
+        # Test dynamic animations
+        app.handle_action("showcase_finger_wave")
+        self.assertEqual(app.active_animation, "finger_wave")
+        app.step_smooth_control(0.02)
+        self.assertEqual(len(app.target_joint_angles), 16)
+
+        app.handle_action("showcase_wave_hello")
+        self.assertEqual(app.active_animation, "wave_hello")
+        app.step_smooth_control(0.02)
+        self.assertEqual(len(app.target_joint_angles), 16)
+
     def test_cli_argument_parsing(self) -> None:
         args = parse_args(["--mode", "both", "--port", "/dev/ttyUSB1", "--profile", "hamin"])
         self.assertEqual(args.mode, "both")

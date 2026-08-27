@@ -60,9 +60,50 @@ COLOR_HUMAN = (0, 200, 255)       # Yellow/Gold in BGR
 
 
 def get_hand_posture(name: str) -> np.ndarray:
-    """Return 16-element joint posture degrees, mapping 'neutral' to open pose."""
-    if name.lower() == "neutral":
+    """Return 16-element joint posture degrees."""
+    n = name.lower()
+    if n in ("neutral", "paper"):
         return get_posture("paper").copy()
+    if n == "rock":
+        return get_posture("rock").copy()
+    if n == "scissors":
+        return get_posture("scissors").copy()
+    if n in ("thumbs_up", "thumb_up"):
+        # Fist with thumb pointing up
+        deg = get_posture("rock").copy()
+        deg[12] = 0.0  # thumb_cmc_side
+        deg[13] = 0.0  # thumb_cmc_flex
+        deg[14] = 0.0  # thumb_mcp_flex
+        deg[15] = 0.0  # thumb_ip_flex
+        return deg
+    if n in ("ok_sign", "ok"):
+        # Index & Thumb pinch, Middle/Ring extended
+        deg = np.zeros(16, dtype=np.float64)
+        deg[0] = 0.0   # index_mcp_side
+        deg[1] = 45.0  # index_mcp_flex
+        deg[2] = 65.0  # index_pip_flex
+        deg[3] = 45.0  # index_dip_flex
+        deg[12] = 20.0 # thumb_cmc_side
+        deg[13] = 45.0 # thumb_cmc_flex
+        deg[14] = 40.0 # thumb_mcp_flex
+        deg[15] = 20.0 # thumb_ip_flex
+        return deg
+    if n == "pointing":
+        # Index extended, others closed
+        deg = get_posture("rock").copy()
+        deg[0] = 0.0
+        deg[1] = 0.0
+        deg[2] = 0.0
+        deg[3] = 0.0
+        return deg
+    if n in ("rock_on", "rockon", "love"):
+        # Index & Ring & Thumb extended, Middle closed
+        deg = np.zeros(16, dtype=np.float64)
+        deg[4] = 0.0   # middle_mcp_side
+        deg[5] = 75.0  # middle_mcp_flex
+        deg[6] = 85.0  # middle_pip_flex
+        deg[7] = 65.0  # middle_dip_flex
+        return deg
     return get_posture(name).copy()
 
 
@@ -274,6 +315,10 @@ class BoothKioskApp:
         self.consecutive_detected_gesture: str | None = None
         self.gesture_streak_count = 0
 
+        # Showcase Dynamic Animation State
+        self.active_animation: str | None = None
+        self.animation_start_time: float = 0.0
+
         # Status & Telemetry
         self.fps = 0.0
         self.last_frame_time = time.monotonic()
@@ -431,45 +476,99 @@ class BoothKioskApp:
             ),
         ]
 
-        # SHOWCASE SCREEN BUTTONS
-        sx, sy, sw, sh = 880, 100, 370, 46
-        s_gap = 10
+        # SHOWCASE SCREEN BUTTONS (2-Column Grid + Dynamic Animations)
+        c1_x, c2_x = 815, 1035
+        bw, bh = 210, 42
+        gap_y = 8
+        sy = 90
+
         self.buttons[AppScreen.SHOWCASE] = [
+            # Column 1: Classic & Basic
             Button(
                 id="showcase_rock",
-                label="Rock Gesture",
+                label="Rock (바위)",
                 shortcut="1",
-                rect=(sx, sy, sw, sh),
+                rect=(c1_x, sy, bw, bh),
             ),
             Button(
                 id="showcase_paper",
-                label="Paper Gesture",
+                label="Paper (보)",
                 shortcut="2",
-                rect=(sx, sy + (sh + s_gap), sw, sh),
+                rect=(c1_x, sy + (bh + gap_y), bw, bh),
             ),
             Button(
                 id="showcase_scissors",
-                label="Scissors Gesture",
+                label="Scissors (가위)",
                 shortcut="3",
-                rect=(sx, sy + 2 * (sh + s_gap), sw, sh),
-            ),
-            Button(
-                id="showcase_middle",
-                label="Middle Finger Extension",
-                shortcut="4",
-                rect=(sx, sy + 3 * (sh + s_gap), sw, sh),
+                rect=(c1_x, sy + 2 * (bh + gap_y), bw, bh),
             ),
             Button(
                 id="showcase_neutral",
-                label="Open Neutral Pose",
-                shortcut="5",
-                rect=(sx, sy + 4 * (sh + s_gap), sw, sh),
+                label="Neutral (편 손)",
+                shortcut="4",
+                rect=(c1_x, sy + 3 * (bh + gap_y), bw, bh),
             ),
             Button(
+                id="showcase_middle",
+                label="Middle (중지)",
+                shortcut="5",
+                rect=(c1_x, sy + 4 * (bh + gap_y), bw, bh),
+                text_color=COLOR_WARNING,
+            ),
+            # Column 2: Expressive Gestures & Wave
+            Button(
+                id="showcase_thumbs_up",
+                label="Thumbs Up (엄지척)",
+                shortcut="6",
+                rect=(c2_x, sy, bw, bh),
+                text_color=COLOR_SUCCESS,
+            ),
+            Button(
+                id="showcase_ok",
+                label="OK Sign (OK사인)",
+                shortcut="7",
+                rect=(c2_x, sy + (bh + gap_y), bw, bh),
+                text_color=COLOR_PRIMARY,
+            ),
+            Button(
+                id="showcase_pointing",
+                label="Pointing (가리키기)",
+                shortcut="8",
+                rect=(c2_x, sy + 2 * (bh + gap_y), bw, bh),
+                text_color=COLOR_SECONDARY,
+            ),
+            Button(
+                id="showcase_rock_on",
+                label="Rock On (락앤롤)",
+                shortcut="9",
+                rect=(c2_x, sy + 3 * (bh + gap_y), bw, bh),
+                text_color=COLOR_ROBOT,
+            ),
+            Button(
+                id="showcase_finger_wave",
+                label="Wave (웨이브)",
+                shortcut="W",
+                rect=(c2_x, sy + 4 * (bh + gap_y), bw, bh),
+                bg_color=(35, 45, 55),
+                hover_color=(50, 65, 80),
+                text_color=COLOR_PRIMARY,
+            ),
+            # Dynamic Animation: Wave Hello
+            Button(
+                id="showcase_wave_hello",
+                label="Wave Hello (손 인사 애니메이션)",
+                shortcut="V",
+                rect=(c1_x, sy + 5 * (bh + gap_y) + 4, 430, bh),
+                bg_color=(30, 50, 35),
+                hover_color=(45, 75, 50),
+                text_color=COLOR_SUCCESS,
+            ),
+            # Return Home
+            Button(
                 id="back_home_showcase",
-                label="Return to Main Menu",
+                label="Return to Main Menu (메인 메뉴)",
                 shortcut="H",
-                rect=(sx, sy + 5 * (sh + s_gap) + 15, sw, sh),
+                rect=(c1_x, sy + 6 * (bh + gap_y) + 20, 430, 46),
                 bg_color=(40, 30, 25),
                 hover_color=(70, 50, 40),
             ),
@@ -509,7 +608,45 @@ class BoothKioskApp:
         if self.current_screen == AppScreen.TELEOP and self.armed:
             self.current_joint_angles = self.target_joint_angles.copy()
         else:
-            # Smooth trajectory interpolation for Showcases and RPS transitions (~300 deg/s)
+            # Dynamic Animation Update
+            if self.current_screen == AppScreen.SHOWCASE and self.active_animation:
+                t = time.monotonic() - self.animation_start_time
+                if self.active_animation == "finger_wave":
+                    wave_pose = np.zeros(16, dtype=np.float64)
+                    # Index wave
+                    wave_pose[1] = 40.0 + 35.0 * math.sin(4.0 * t)
+                    wave_pose[2] = 45.0 + 40.0 * math.sin(4.0 * t)
+                    wave_pose[3] = 35.0 + 30.0 * math.sin(4.0 * t)
+                    # Middle wave (phase offset -1.0)
+                    wave_pose[5] = 40.0 + 35.0 * math.sin(4.0 * t - 1.0)
+                    wave_pose[6] = 45.0 + 40.0 * math.sin(4.0 * t - 1.0)
+                    wave_pose[7] = 35.0 + 30.0 * math.sin(4.0 * t - 1.0)
+                    # Ring wave (phase offset -2.0)
+                    wave_pose[9] = 40.0 + 35.0 * math.sin(4.0 * t - 2.0)
+                    wave_pose[10] = 45.0 + 40.0 * math.sin(4.0 * t - 2.0)
+                    wave_pose[11] = 35.0 + 30.0 * math.sin(4.0 * t - 2.0)
+                    # Thumb wave (phase offset -3.0)
+                    wave_pose[13] = 30.0 + 25.0 * math.sin(4.0 * t - 3.0)
+                    wave_pose[14] = 35.0 + 30.0 * math.sin(4.0 * t - 3.0)
+                    wave_pose[15] = 25.0 + 20.0 * math.sin(4.0 * t - 3.0)
+                    self.target_joint_angles = wave_pose
+                elif self.active_animation == "wave_hello":
+                    hello_pose = np.zeros(16, dtype=np.float64)
+                    side_val = 18.0 * math.sin(5.0 * t)
+                    hello_pose[0] = side_val
+                    hello_pose[4] = side_val
+                    hello_pose[8] = side_val
+                    hello_pose[12] = 10.0 * math.sin(5.0 * t)
+                    flex_val = 20.0 + 15.0 * math.sin(3.0 * t)
+                    hello_pose[1] = flex_val
+                    hello_pose[2] = flex_val
+                    hello_pose[5] = flex_val
+                    hello_pose[6] = flex_val
+                    hello_pose[9] = flex_val
+                    hello_pose[10] = flex_val
+                    self.target_joint_angles = hello_pose
+
+            # Smooth trajectory interpolation for Showcases and RPS transitions (~350 deg/s)
             max_step = self.max_joint_speed * max(0.001, min(dt, 0.05))
             diff = self.target_joint_angles - self.current_joint_angles
             step = np.clip(diff, -max_step, max_step)
@@ -603,15 +740,27 @@ class BoothKioskApp:
 
         # Showcase Actions
         elif action_id == "showcase_rock":
-            self.play_showcase_posture("rock", "Rock Gesture")
+            self.play_showcase_posture("rock", "Rock Gesture (바위)")
         elif action_id == "showcase_paper":
-            self.play_showcase_posture("paper", "Paper Gesture")
+            self.play_showcase_posture("paper", "Paper Gesture (보)")
         elif action_id == "showcase_scissors":
-            self.play_showcase_posture("scissors", "Scissors Gesture")
+            self.play_showcase_posture("scissors", "Scissors Gesture (가위)")
+        elif action_id == "showcase_neutral":
+            self.play_showcase_posture("neutral", "Open Neutral (편 손)")
         elif action_id == "showcase_middle":
             self.play_showcase_middle_finger()
-        elif action_id == "showcase_neutral":
-            self.play_showcase_posture("neutral", "Open Neutral")
+        elif action_id == "showcase_thumbs_up":
+            self.play_showcase_posture("thumbs_up", "Thumbs Up (엄지 척)")
+        elif action_id == "showcase_ok":
+            self.play_showcase_posture("ok_sign", "OK Sign (OK 사인)")
+        elif action_id == "showcase_pointing":
+            self.play_showcase_posture("pointing", "Pointing (가리키기)")
+        elif action_id == "showcase_rock_on":
+            self.play_showcase_posture("rock_on", "Rock On (락앤롤)")
+        elif action_id == "showcase_finger_wave":
+            self.play_showcase_animation("finger_wave", "Finger Wave (파도타기 애니메이션)")
+        elif action_id == "showcase_wave_hello":
+            self.play_showcase_animation("wave_hello", "Wave Hello (손 인사 애니메이션)")
 
     def arm_robot(self) -> None:
         """Enable hardware torque and activate teleoperation tracking."""
@@ -661,6 +810,7 @@ class BoothKioskApp:
         self.status_color = COLOR_SECONDARY
 
     def play_showcase_posture(self, posture_name: str, display_name: str) -> None:
+        self.active_animation = None
         if self.hardware_controller is not None and not self.hardware_controller.torque_enabled:
             self.hardware_controller.enable_torque()
         deg = get_hand_posture(posture_name)
@@ -669,6 +819,7 @@ class BoothKioskApp:
         self.status_color = COLOR_SUCCESS
 
     def play_showcase_middle_finger(self) -> None:
+        self.active_animation = None
         if self.hardware_controller is not None and not self.hardware_controller.torque_enabled:
             self.hardware_controller.enable_torque()
         deg = get_hand_posture("rock").copy()
@@ -677,8 +828,16 @@ class BoothKioskApp:
         deg[6] = 0.0  # mf_pip_flex
         deg[7] = 0.0  # mf_dip_flex
         self.send_robot_posture_degrees(deg)
-        self.status_message = "Postured: Middle Finger Extension"
+        self.status_message = "Postured: Middle Finger Extension (중지)"
         self.status_color = COLOR_WARNING
+
+    def play_showcase_animation(self, anim_name: str, display_name: str) -> None:
+        if self.hardware_controller is not None and not self.hardware_controller.torque_enabled:
+            self.hardware_controller.enable_torque()
+        self.active_animation = anim_name
+        self.animation_start_time = time.monotonic()
+        self.status_message = f"Animation Running: {display_name}"
+        self.status_color = COLOR_PRIMARY
 
     def update_teleop_frame(self, frame: np.ndarray, landmarks_list: list[Any]) -> None:
         """Process teleoperation hand tracking, calibration, and joint commanding."""
@@ -1185,9 +1344,21 @@ class BoothKioskApp:
                     elif key == ord("3"):
                         self.handle_action("showcase_scissors")
                     elif key == ord("4"):
-                        self.handle_action("showcase_middle")
-                    elif key == ord("5"):
                         self.handle_action("showcase_neutral")
+                    elif key == ord("5"):
+                        self.handle_action("showcase_middle")
+                    elif key == ord("6"):
+                        self.handle_action("showcase_thumbs_up")
+                    elif key == ord("7"):
+                        self.handle_action("showcase_ok")
+                    elif key == ord("8"):
+                        self.handle_action("showcase_pointing")
+                    elif key == ord("9"):
+                        self.handle_action("showcase_rock_on")
+                    elif key in (ord("w"), ord("W")):
+                        self.handle_action("showcase_finger_wave")
+                    elif key in (ord("v"), ord("V")):
+                        self.handle_action("showcase_wave_hello")
 
         finally:
             if cap.isOpened():
