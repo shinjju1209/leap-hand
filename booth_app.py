@@ -500,18 +500,29 @@ class BoothKioskApp:
                 self.hardware_controller = None
 
     def send_robot_posture_degrees(self, posture_degrees: Sequence[float]) -> None:
-        """Send target angles to both hardware and MuJoCo controllers."""
+        """Set target angles for smooth interpolation towards the target posture."""
         angles = np.asarray(posture_degrees, dtype=np.float64)
         self.target_joint_angles = angles.copy()
 
+    def step_smooth_control(self, dt: float = 0.02) -> None:
+        """Smoothly interpolate current joint angles towards target angles with speed limiting."""
+        if self.current_screen == AppScreen.TELEOP and self.armed:
+            self.current_joint_angles = self.target_joint_angles.copy()
+        else:
+            # Smooth trajectory interpolation for Showcases and RPS transitions (~300 deg/s)
+            max_step = self.max_joint_speed * max(0.001, min(dt, 0.05))
+            diff = self.target_joint_angles - self.current_joint_angles
+            step = np.clip(diff, -max_step, max_step)
+            self.current_joint_angles += step
+
         if self.mujoco_controller is not None:
-            self.mujoco_controller.set_target_degrees(angles)
-            self.mujoco_controller.step_for(0.02)
+            self.mujoco_controller.set_target_degrees(self.current_joint_angles)
+            self.mujoco_controller.step_for(dt)
             self.mujoco_controller.sync_viewer()
 
         if self.hardware_controller is not None and self.hardware_controller.torque_enabled:
             try:
-                self.hardware_controller.command_degrees(angles)
+                self.hardware_controller.command_degrees(self.current_joint_angles)
             except Exception as e:
                 print(f"[HARDWARE ERROR] Command failed: {e}")
 
@@ -1087,10 +1098,8 @@ class BoothKioskApp:
                 elif self.current_screen == AppScreen.RPS:
                     self.update_rps_frame(frame, landmarks_list)
 
-                # Continuously step physics towards the target joint angles
-                if self.mujoco_controller is not None:
-                    self.mujoco_controller.step_for(0.02)
-                    self.mujoco_controller.sync_viewer()
+                # Smooth joint interpolation and physics stepping
+                self.step_smooth_control(0.02)
 
                 canvas = self.render(frame, landmarks_list)
                 cv2.imshow(self.window_name, canvas)
