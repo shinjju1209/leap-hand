@@ -149,6 +149,22 @@ class NeutralCalibration:
         self._started_at = None
         self._samples = []
 
+    def reset(self, hand_label: str | None = None) -> None:
+        """Reset calibration data for a specific hand or the entire active profile."""
+        if hand_label is not None:
+            hand_label = self._validate_hand_label(hand_label)
+            self._profiles.get(self.profile, {}).pop(hand_label, None)
+            self._sample_counts.get(self.profile, {}).pop(hand_label, None)
+            self._closed_profiles.get(self.profile, {}).pop(hand_label, None)
+            self._closed_sample_counts.get(self.profile, {}).pop(hand_label, None)
+        else:
+            self._profiles.pop(self.profile, None)
+            self._sample_counts.pop(self.profile, None)
+            self._closed_profiles.pop(self.profile, None)
+            self._closed_sample_counts.pop(self.profile, None)
+        self._save()
+        self.cancel()
+
     def progress(self, timestamp_seconds: float) -> float:
         if not self.is_collecting or self._started_at is None:
             return 0.0

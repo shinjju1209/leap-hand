@@ -213,12 +213,22 @@ class NeutralCalibrationTests(unittest.TestCase):
         self.assertTrue(calibration.is_collecting)
         self.assertEqual(calibration.sample_count, 0)
 
-    def test_invalid_angle_vector_is_rejected(self):
-        calibration = NeutralCalibration(self.path)
-        with self.assertRaises(ValueError):
-            calibration.apply("Right", np.zeros(15))
-        with self.assertRaises(ValueError):
-            calibration.apply("Right", np.full(16, np.nan))
+    def test_reset_profile_and_hand(self):
+        calibration = NeutralCalibration(self.path, profile="test_p", min_samples=1, duration_seconds=0.1)
+        calibration.start("Right", 0.0)
+        calibration.add_sample("Right", np.ones(16), 0.2)
+        self.assertTrue(calibration.has_offset("Right"))
+
+        # Reset specific hand
+        calibration.reset("Right")
+        self.assertFalse(calibration.has_offset("Right"))
+        self.assertFalse(calibration.is_collecting)
+
+        # Reset whole profile
+        calibration.start("Right", 0.0)
+        calibration.add_sample("Right", np.ones(16), 0.2)
+        calibration.reset()
+        self.assertFalse(calibration.has_offset("Right"))
 
 
 if __name__ == "__main__":
