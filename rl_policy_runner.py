@@ -121,14 +121,16 @@ class TorchScriptPolicyBackend(PolicyBackend):
 
 
 # Official LEAP_Hand_Sim joint permutations and canonical limits
-OFFICIAL_SIM_TO_REAL = np.array([1, 0, 2, 3, 9, 8, 10, 11, 13, 12, 14, 15, 4, 5, 6, 7], dtype=np.int64)
-OFFICIAL_REAL_TO_SIM = np.array([1, 0, 2, 3, 12, 13, 14, 15, 5, 4, 6, 7, 9, 8, 10, 11], dtype=np.int64)
+# Isaac Gym order: Index(0~3), Thumb(4~7), Middle(8~11), Ring(12~15)
+# REAL / ANGLE_NAMES order: Index(0~3), Middle(4~7), Ring(8~11), Thumb(12~15)
+OFFICIAL_REAL_TO_SIM = np.array([0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7, 8, 9, 10, 11], dtype=np.int64)
+OFFICIAL_SIM_TO_REAL = np.array([0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 4, 5, 6, 7], dtype=np.int64)
 
 OFFICIAL_CANONICAL_POSE_SIM = np.array([
-    0.1458, -1.047, 1.7247, -0.2187,
-    1.2985, 1.6139, 0.9757, 1.0728,
-    -0.1054, 0.029, 1.6039, 0.1227,
-    -0.1084, 0.9652, 1.7317, 0.1071,
+    0.2078, -0.9765, 1.7760, -0.1653,
+    1.0993,  1.3305, 0.8575,  1.0603,
+    -0.1046, -0.0162, 1.5904,  0.1451,
+    0.1976,  0.8854, 1.7806,  0.0184,
 ], dtype=np.float64)
 OFFICIAL_CANONICAL_POSE_REAL = OFFICIAL_CANONICAL_POSE_SIM[OFFICIAL_SIM_TO_REAL]
 
@@ -254,7 +256,10 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
                 np.sin(2.0 * np.pi * t_sec / self.phase_period),
                 np.cos(2.0 * np.pi * t_sec / self.phase_period),
             ], dtype=np.float32)
-            cur_sim = self.sim_target.copy()
+            if len(obs_arr) >= 16:
+                cur_sim = obs_arr[:16][OFFICIAL_REAL_TO_SIM].astype(np.float64)
+            else:
+                cur_sim = self.sim_target.copy()
             unscaled = (2.0 * cur_sim - OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER) / (
                 OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER
             )

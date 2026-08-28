@@ -25,7 +25,7 @@
     <geom solimp="0.999 0.999 0.001 0.0001 1" solref="0.0001 1" friction=".2"/>
 
     <!-- actuator defaults -->
-    <position kp="3.0" kv="0.01"/>
+    <position kp="12.0" kv="0.05"/>
     <joint damping="0.03" frictionloss="0.001"/>
 
     <!-- geom class defaults -->
@@ -36,10 +36,10 @@
       <geom material="black"/>
     </default>
     <default class="tip">
-      <geom type="mesh" mesh="tip" friction="0.5" material="white"/>
+      <geom type="mesh" mesh="tip" friction="1.2" material="white"/>
     </default>
     <default class="thumb_tip">
-      <geom type="mesh" mesh="thumb_tip" friction="0.5" material="white"/>
+      <geom type="mesh" mesh="thumb_tip" friction="1.2" material="white"/>
     </default>
 
     <!-- joint class defaults -->

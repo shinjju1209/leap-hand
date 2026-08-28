@@ -348,7 +348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     error_msg = f"Hardware read error: {e}"
                     current_deg = default_deg.copy()
             elif mujoco_controller is not None:
-                current_rad = mujoco_controller.data.qpos[:16].copy()
+                current_rad = mujoco_controller.data.qpos[mujoco_controller.qpos_addresses].copy()
                 current_deg = np.rad2deg(current_rad)
             else:
                 current_deg = default_deg.copy()
@@ -378,7 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
                 # Send command to targets (Direct joint control for RL policy)
                 if mujoco_controller is not None:
-                    mujoco_controller.data.ctrl[:16] = target_rad
+                    mujoco_controller.set_target_degrees(target_deg)
                     mujoco_controller.step_for(dt)
                     mujoco_controller.sync_viewer()
 
@@ -439,7 +439,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key in (ord("r"), ord("R")):  # RESET Hand & Cube
                 print("\n[DEPLOY] Resetting hand and cube position...")
                 if mujoco_controller is not None:
-                    mujoco_controller.data.qpos[:16] = default_joint_pose
+                    mujoco_controller.data.qpos[mujoco_controller.qpos_addresses] = default_joint_pose
+                    mujoco_controller.set_target_degrees(default_deg)
                     if len(mujoco_controller.data.qpos) >= 23:
                         mujoco_controller.data.qpos[16:19] = [0.005, 0.030, 0.155]
                         mujoco_controller.data.qpos[19:23] = [1.0, 0.0, 0.0, 0.0]
