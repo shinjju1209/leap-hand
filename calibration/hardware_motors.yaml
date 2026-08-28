@@ -1,0 +1,68 @@
+version: 1
+description: LEAP Hand v1 per-motor open-pose calibration. Values are in hand_angles.ANGLE_NAMES
+  order.
+joints:
+  index_mcp_side:
+    motor_id: 0
+    open_motor_radians: 3.146194596
+    sign: 1
+  index_mcp_flex:
+    motor_id: 1
+    open_motor_radians: 1.541650692
+    sign: 1
+  index_pip_flex:
+    motor_id: 2
+    open_motor_radians: 3.07716546
+    sign: 1
+  index_dip_flex:
+    motor_id: 3
+    open_motor_radians: 3.239767424
+    sign: 1
+  middle_mcp_side:
+    motor_id: 4
+    open_motor_radians: 3.1538645
+    sign: 1
+  middle_mcp_flex:
+    motor_id: 5
+    open_motor_radians: 1.595340019
+    sign: 1
+  middle_pip_flex:
+    motor_id: 6
+    open_motor_radians: 3.080233422
+    sign: 1
+  middle_dip_flex:
+    motor_id: 7
+    open_motor_radians: 3.083301384
+    sign: 1
+  ring_mcp_side:
+    motor_id: 8
+    open_motor_radians: 3.140058673
+    sign: 1
+  ring_mcp_flex:
+    motor_id: 9
+    open_motor_radians: 1.533980788
+    sign: 1
+  ring_pip_flex:
+    motor_id: 10
+    open_motor_radians: 3.120116923
+    sign: 1
+  ring_dip_flex:
+    motor_id: 11
+    open_motor_radians: 3.129320807
+    sign: 1
+  thumb_cmc_side:
+    motor_id: 12
+    open_motor_radians: 3.132388769
+    sign: 1
+  thumb_cmc_flex:
+    motor_id: 13
+    open_motor_radians: 3.150796538
+    sign: 1
+  thumb_mcp_flex:
+    motor_id: 14
+    open_motor_radians: 3.138524692
+    sign: 1
+  thumb_ip_flex:
+    motor_id: 15
+    open_motor_radians: 3.155398481
+    sign: 1
