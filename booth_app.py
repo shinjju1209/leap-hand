@@ -42,6 +42,7 @@ from webcam_hand_tracking import (
 )
 
 DEFAULT_CALIB_PATH = Path("calibration/neutral_calibration.json")
+DEFAULT_MOTOR_CALIB_PATH = Path("calibration/hardware_motors.yaml")
 DEFAULT_MODEL_PATH = Path("models/hand_landmarker.task")
 
 # Colors in BGR format (Modern Dark Cyberpunk theme)
@@ -263,6 +264,7 @@ class BoothKioskApp:
         port: str = "/dev/ttyUSB0",
         profile: str = "jiwoo",
         calib_path: Path = DEFAULT_CALIB_PATH,
+        motor_calib_path: Path = DEFAULT_MOTOR_CALIB_PATH,
         model_path: Path = DEFAULT_MODEL_PATH,
         camera_id: int = 0,
         current_limit: int = 350,
@@ -276,6 +278,7 @@ class BoothKioskApp:
         self.mode = mode
         self.port = port
         self.profile = profile
+        self.motor_calib_path = motor_calib_path
         self.camera_id = camera_id
         self.current_limit = current_limit
         self.max_joint_speed = max_joint_speed
@@ -588,9 +591,15 @@ class BoothKioskApp:
 
         if self.enable_hardware:
             try:
+                motor_calib = (
+                    self.motor_calib_path
+                    if self.motor_calib_path.is_file()
+                    else None
+                )
                 self.hardware_controller = LeapHandHardwareController(
                     port=self.port,
                     current_limit_milliamps=self.current_limit,
+                    motor_calibration=motor_calib,
                 )
                 self.hardware_controller.connect()
                 self.hardware_controller.configure()
@@ -605,53 +614,54 @@ class BoothKioskApp:
         self.target_joint_angles = angles.copy()
 
     def step_smooth_control(self, dt: float = 0.02) -> None:
-        """Smoothly interpolate current joint angles towards target angles with speed limiting."""
-        if self.current_screen == AppScreen.TELEOP and self.armed:
-            self.current_joint_angles = self.target_joint_angles.copy()
-        else:
-            # Dynamic Animation Update
-            if self.current_screen == AppScreen.SHOWCASE and self.active_animation:
-                t = time.monotonic() - self.animation_start_time
-                if self.active_animation == "finger_wave":
-                    wave_pose = np.zeros(16, dtype=np.float64)
-                    # Index wave
-                    wave_pose[1] = 40.0 + 35.0 * math.sin(4.0 * t)
-                    wave_pose[2] = 45.0 + 40.0 * math.sin(4.0 * t)
-                    wave_pose[3] = 35.0 + 30.0 * math.sin(4.0 * t)
-                    # Middle wave (phase offset -1.0)
-                    wave_pose[5] = 40.0 + 35.0 * math.sin(4.0 * t - 1.0)
-                    wave_pose[6] = 45.0 + 40.0 * math.sin(4.0 * t - 1.0)
-                    wave_pose[7] = 35.0 + 30.0 * math.sin(4.0 * t - 1.0)
-                    # Ring wave (phase offset -2.0)
-                    wave_pose[9] = 40.0 + 35.0 * math.sin(4.0 * t - 2.0)
-                    wave_pose[10] = 45.0 + 40.0 * math.sin(4.0 * t - 2.0)
-                    wave_pose[11] = 35.0 + 30.0 * math.sin(4.0 * t - 2.0)
-                    # Thumb wave (phase offset -3.0)
-                    wave_pose[13] = 30.0 + 25.0 * math.sin(4.0 * t - 3.0)
-                    wave_pose[14] = 35.0 + 30.0 * math.sin(4.0 * t - 3.0)
-                    wave_pose[15] = 25.0 + 20.0 * math.sin(4.0 * t - 3.0)
-                    self.target_joint_angles = wave_pose
-                elif self.active_animation == "wave_hello":
-                    hello_pose = np.zeros(16, dtype=np.float64)
-                    side_val = 18.0 * math.sin(5.0 * t)
-                    hello_pose[0] = side_val
-                    hello_pose[4] = side_val
-                    hello_pose[8] = side_val
-                    hello_pose[12] = 10.0 * math.sin(5.0 * t)
-                    flex_val = 20.0 + 15.0 * math.sin(3.0 * t)
-                    hello_pose[1] = flex_val
-                    hello_pose[2] = flex_val
-                    hello_pose[5] = flex_val
-                    hello_pose[6] = flex_val
-                    hello_pose[9] = flex_val
-                    hello_pose[10] = flex_val
-                    self.target_joint_angles = hello_pose
+        """Smoothly interpolate current joint angles for Showcase and RPS modes only."""
+        if self.current_screen == AppScreen.TELEOP:
+            # Teleoperation mode uses direct 1:1 instantaneous commands without showcase rate-limiting
+            return
 
-            # Smooth trajectory interpolation for Showcases and RPS transitions (~350 deg/s)
-            max_step = self.max_joint_speed * max(0.001, min(dt, 0.05))
-            diff = self.target_joint_angles - self.current_joint_angles
-            step = np.clip(diff, -max_step, max_step)
-            self.current_joint_angles += step
+        # Dynamic Animation Update for Showcase
+        if self.current_screen == AppScreen.SHOWCASE and self.active_animation:
+            t = time.monotonic() - self.animation_start_time
+            if self.active_animation == "finger_wave":
+                wave_pose = np.zeros(16, dtype=np.float64)
+                # Index wave
+                wave_pose[1] = 40.0 + 35.0 * math.sin(4.0 * t)
+                wave_pose[2] = 45.0 + 40.0 * math.sin(4.0 * t)
+                wave_pose[3] = 35.0 + 30.0 * math.sin(4.0 * t)
+                # Middle wave (phase offset -1.0)
+                wave_pose[5] = 40.0 + 35.0 * math.sin(4.0 * t - 1.0)
+                wave_pose[6] = 45.0 + 40.0 * math.sin(4.0 * t - 1.0)
+                wave_pose[7] = 35.0 + 30.0 * math.sin(4.0 * t - 1.0)
+                # Ring wave (phase offset -2.0)
+                wave_pose[9] = 40.0 + 35.0 * math.sin(4.0 * t - 2.0)
+                wave_pose[10] = 45.0 + 40.0 * math.sin(4.0 * t - 2.0)
+                wave_pose[11] = 35.0 + 30.0 * math.sin(4.0 * t - 2.0)
+                # Thumb wave (phase offset -3.0)
+                wave_pose[13] = 30.0 + 25.0 * math.sin(4.0 * t - 3.0)
+                wave_pose[14] = 35.0 + 30.0 * math.sin(4.0 * t - 3.0)
+                wave_pose[15] = 25.0 + 20.0 * math.sin(4.0 * t - 3.0)
+                self.target_joint_angles = wave_pose
+            elif self.active_animation == "wave_hello":
+                hello_pose = np.zeros(16, dtype=np.float64)
+                side_val = 18.0 * math.sin(5.0 * t)
+                hello_pose[0] = side_val
+                hello_pose[4] = side_val
+                hello_pose[8] = side_val
+                hello_pose[12] = 10.0 * math.sin(5.0 * t)
+                flex_val = 20.0 + 15.0 * math.sin(3.0 * t)
+                hello_pose[1] = flex_val
+                hello_pose[2] = flex_val
+                hello_pose[5] = flex_val
+                hello_pose[6] = flex_val
+                hello_pose[9] = flex_val
+                hello_pose[10] = flex_val
+                self.target_joint_angles = hello_pose
+
+        # Smooth trajectory interpolation for Showcases and RPS transitions (~350 deg/s)
+        max_step = self.max_joint_speed * max(0.001, min(dt, 0.05))
+        diff = self.target_joint_angles - self.current_joint_angles
+        step = np.clip(diff, -max_step, max_step)
+        self.current_joint_angles += step
 
         if self.mujoco_controller is not None:
             self.mujoco_controller.set_target_degrees(self.current_joint_angles)
@@ -866,9 +876,20 @@ class BoothKioskApp:
         smoothed_angles = self.filter.filter(calibrated_angles, time.monotonic())
 
         self.current_joint_angles = smoothed_angles.copy()
+        self.target_joint_angles = smoothed_angles.copy()
 
+        # Direct 1:1 Instantaneous Hardware and Simulation Dispatch (Zero lag!)
         if self.armed:
-            self.send_robot_posture_degrees(smoothed_angles)
+            if self.hardware_controller is not None and self.hardware_controller.torque_enabled:
+                try:
+                    self.hardware_controller.command_degrees(smoothed_angles)
+                except Exception as e:
+                    print(f"[HARDWARE ERROR] Command failed: {e}")
+
+        if self.mujoco_controller is not None:
+            self.mujoco_controller.set_target_degrees(smoothed_angles)
+            self.mujoco_controller.step_for(0.02)
+            self.mujoco_controller.sync_viewer()
 
     def update_rps_frame(self, frame: np.ndarray, landmarks_list: list[Any]) -> None:
         """Process Rock-Paper-Scissors game loop, gesture detection, and robot moves."""
@@ -1059,7 +1080,7 @@ class BoothKioskApp:
             vis_frame = camera_frame.copy()
             if landmarks_list:
                 for lm in landmarks_list:
-                    draw_hand(vis_frame, lm, [], False)
+                    draw_hand(vis_frame, lm, [], True)
             resized = cv2.resize(vis_frame, (vw - 8, vh - 8))
             canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
         else:
@@ -1123,7 +1144,7 @@ class BoothKioskApp:
             vis_frame = camera_frame.copy()
             if landmarks_list:
                 for lm in landmarks_list:
-                    draw_hand(vis_frame, lm, [], False)
+                    draw_hand(vis_frame, lm, [], True)
             resized = cv2.resize(vis_frame, (vw - 8, vh - 8))
             canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
 
@@ -1278,25 +1299,26 @@ class BoothKioskApp:
         try:
             while True:
                 ret = False
-                frame = None
-                if cap.isOpened():
-                    ret, frame = cap.read()
-                    if ret and frame is not None:
-                        frame = cv2.flip(frame, 1)
-
+                raw_frame = None
+                display_frame = None
                 landmarks_list = []
-                if ret and frame is not None:
-                    landmarks_list = self.tracker.process_frame(frame)
+                if cap.isOpened():
+                    ret, raw_frame = cap.read()
+                    if ret and raw_frame is not None:
+                        # 1. Detect hand landmarks on unmirrored raw camera frame (essential for correct anatomy!)
+                        landmarks_list = self.tracker.process_frame(raw_frame)
+                        # 2. Mirror frame for user display
+                        display_frame = cv2.flip(raw_frame, 1)
 
                 if self.current_screen == AppScreen.TELEOP:
-                    self.update_teleop_frame(frame, landmarks_list)
+                    self.update_teleop_frame(raw_frame, landmarks_list)
                 elif self.current_screen == AppScreen.RPS:
-                    self.update_rps_frame(frame, landmarks_list)
+                    self.update_rps_frame(raw_frame, landmarks_list)
 
-                # Smooth joint interpolation and physics stepping
+                # Smooth joint interpolation and physics stepping (Showcase and RPS only)
                 self.step_smooth_control(0.02)
 
-                canvas = self.render(frame, landmarks_list)
+                canvas = self.render(display_frame, landmarks_list)
                 cv2.imshow(self.window_name, canvas)
 
                 key = cv2.waitKey(1) & 0xFF
@@ -1400,6 +1422,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Path to neutral calibration JSON file (default: calibration/neutral_calibration.json)",
     )
     parser.add_argument(
+        "--motor-calib-path",
+        type=Path,
+        default=DEFAULT_MOTOR_CALIB_PATH,
+        help="Path to hardware motor calibration YAML file (default: calibration/hardware_motors.yaml)",
+    )
+    parser.add_argument(
         "--camera-id",
         type=int,
         default=0,
@@ -1434,6 +1462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         port=args.port,
         profile=args.profile,
         calib_path=args.calib_path,
+        motor_calib_path=args.motor_calib_path,
         camera_id=args.camera_id,
         current_limit=args.current_limit,
         enable_mujoco=enable_mujoco,
