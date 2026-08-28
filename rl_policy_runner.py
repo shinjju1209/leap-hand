@@ -162,6 +162,7 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
     ) -> None:
         import torch
         import torch.nn as nn
+        from collections import deque
 
         self.model_path = Path(model_path).resolve()
         if not self.model_path.is_file():
@@ -170,6 +171,7 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
         self.device = torch.device(device)
         self.action_scale = float(action_scale)
         self.phase_period = float(phase_period)
+        self.history: deque[np.ndarray] = deque(maxlen=3)
 
         data = torch.load(str(self.model_path), map_location=self.device, weights_only=False)
         model_dict = data["model"] if isinstance(data, dict) and "model" in data else data
@@ -239,32 +241,52 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
 
         self.sim_target = OFFICIAL_CANONICAL_POSE_SIM.copy()
         self.step_counter = 0
+        self._init_history()
+
+    def _init_history(self) -> None:
+        self.history.clear()
+        cur_sim = self.sim_target.copy()
+        unscaled = (2.0 * cur_sim - OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER) / (
+            OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER
+        )
+        init_chunk = np.concatenate([unscaled, self.sim_target, [0.0, 1.0]]).astype(np.float32)
+        for _ in range(3):
+            self.history.append(init_chunk.copy())
 
     def reset(self) -> None:
         self.model.reset_hidden()
         self.sim_target = OFFICIAL_CANONICAL_POSE_SIM.copy()
         self.step_counter = 0
+        self._init_history()
 
-    def __call__(self, obs: np.ndarray) -> np.ndarray:
+    def __call__(
+        self, obs: np.ndarray, target_command: float = 1.0
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Step official policy with current joint state.
+
+        Returns:
+            (target_rad_real, target_deg_real, raw_action_real)
+        """
         import torch
 
         obs_arr = np.asarray(obs, dtype=np.float32)
-        if obs_arr.shape[-1] < 102:
-            # Build official 102-dim observation from current state
+        if obs_arr.size < 102:
+            # Build official 102-dim observation from current actual joint state
             t_sec = self.step_counter * 0.05
             phase = np.array([
-                np.sin(2.0 * np.pi * t_sec / self.phase_period),
-                np.cos(2.0 * np.pi * t_sec / self.phase_period),
+                target_command * np.sin(2.0 * np.pi * t_sec / self.phase_period),
+                target_command * np.cos(2.0 * np.pi * t_sec / self.phase_period),
             ], dtype=np.float32)
-            if len(obs_arr) >= 16:
+            if obs_arr.size >= 16:
                 cur_sim = obs_arr[:16][OFFICIAL_REAL_TO_SIM].astype(np.float64)
             else:
                 cur_sim = self.sim_target.copy()
             unscaled = (2.0 * cur_sim - OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER) / (
                 OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER
             )
-            step_chunk = np.concatenate([unscaled, self.sim_target, phase]).astype(np.float32)
-            obs_arr = np.concatenate([step_chunk, step_chunk, step_chunk])
+            current_chunk = np.concatenate([unscaled, self.sim_target, phase]).astype(np.float32)
+            self.history.append(current_chunk)
+            obs_arr = np.concatenate(list(self.history)).astype(np.float32)
 
         self.step_counter += 1
         obs_tensor = torch.as_tensor(obs_arr, dtype=torch.float32, device=self.device)
@@ -272,14 +294,16 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
             action_tensor = self.model(obs_tensor)
         action_sim = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float64)
 
-        # Integrate target in SIM frame, then permute to REAL frame
+        # Integrate target in SIM frame
         self.sim_target = np.clip(
             self.sim_target + self.action_scale * action_sim,
             OFFICIAL_DOF_LOWER,
             OFFICIAL_DOF_UPPER,
         )
         action_real = action_sim[OFFICIAL_SIM_TO_REAL]
-        return action_real
+        target_rad_real = self.sim_target[OFFICIAL_SIM_TO_REAL]
+        target_deg_real = np.rad2deg(target_rad_real)
+        return target_rad_real, target_deg_real, action_real
 
 
 class OnnxPolicyBackend(PolicyBackend):
@@ -670,6 +694,13 @@ class RLPolicyRunner:
         angles = _vector16(current_joint_angles, "current_joint_angles")
         current_rad = np.deg2rad(angles) if is_degrees else angles
 
+        if isinstance(self.policy, LeapHandOfficialPolicyBackend):
+            target_rad, target_deg, raw_action = self.policy(
+                current_rad, target_command=target_command
+            )
+            self._last_action = raw_action.copy()
+            return target_deg, target_rad, raw_action
+
         if extra_obs is not None:
             extra_arr = np.asarray(extra_obs, dtype=np.float64).ravel()
             obs = np.concatenate([current_rad, self._last_action, extra_arr]).astype(np.float64)
@@ -691,6 +722,8 @@ class RLPolicyRunner:
         self.obs_manager.reset()
         self.action_processor.reset()
         self._last_action = np.zeros(16, dtype=np.float64)
+        if hasattr(self.policy, "reset") and callable(self.policy.reset):
+            self.policy.reset()
 
 
 __all__ = [

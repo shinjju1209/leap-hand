@@ -44,36 +44,36 @@
 
     <!-- joint class defaults -->
     <default class="mcp">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.314 2.23"/>
-      <position ctrlrange="-0.314 2.23"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-1.572 1.858"/>
+      <position ctrlrange="-1.572 1.858"/>
     </default>
     <default class="rot">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-1.047 1.047"/>
-      <position ctrlrange="-1.047 1.047"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-1.572 1.558"/>
+      <position ctrlrange="-1.572 1.558"/>
     </default>
     <default class="pip">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.506 1.885"/>
-      <position ctrlrange="-0.506 1.885"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-1.222 1.858"/>
+      <position ctrlrange="-1.222 1.858"/>
     </default>
     <default class="dip">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.366 2.042"/>
-      <position ctrlrange="-0.366 2.042"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-1.342 1.858"/>
+      <position ctrlrange="-1.342 1.858"/>
     </default>
     <default class="thumb_cmc">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.349 2.094"/>
-      <position ctrlrange="-0.349 2.094"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.519 1.741"/>
+      <position ctrlrange="-0.519 1.741"/>
     </default>
     <default class="thumb_axl">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.349 2.094"/>
-      <position ctrlrange="-0.349 2.094"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.572 1.968"/>
+      <position ctrlrange="-0.572 1.968"/>
     </default>
     <default class="thumb_mcp">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.47 2.443"/>
-      <position ctrlrange="-0.47 2.443"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-0.252 1.858"/>
+      <position ctrlrange="-0.252 1.858"/>
     </default>
     <default class="thumb_ipl">
-      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-1.34 1.88"/>
-      <position ctrlrange="-1.34 1.88"/>
+      <joint pos="0 0 0" axis="0 0 -1" limited="true" range="-1.342 1.858"/>
+      <position ctrlrange="-1.342 1.858"/>
     </default>
   </default>
 
