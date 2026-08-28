@@ -213,7 +213,7 @@ class UnbeatableRpsApp:
         # State Machine
         self.match_state: MatchState = MatchState.IDLE
         self.countdown_start_time = 0.0
-        self.countdown_duration = 2.4  # Snappy 2.4s (0.8s per step)
+        self.countdown_duration = 3.0  # Exactly 1.0s each: 3 -> 2 -> 1 -> SHOOT!
         self.result_start_time = 0.0
         self.result_duration = 2.5
         self.decision_reaction_time_ms = 0.0
@@ -454,35 +454,58 @@ class UnbeatableRpsApp:
 
         elif self.match_state == MatchState.COUNTDOWN:
             elapsed = time.monotonic() - self.countdown_start_time
-            step = int(elapsed / (self.countdown_duration / 3.0))
-            countdown_words = ["ROCK (바위)...", "PAPER (보)...", "SCISSORS (가위)...", "SHOOT! (탕!)"]
-            cur_word = countdown_words[min(step, len(countdown_words) - 1)]
 
+            if elapsed < 1.0:
+                count_num = "3"
+                sub_text = "가위... (READY)"
+                num_color = COLOR_PRIMARY
+            elif elapsed < 2.0:
+                count_num = "2"
+                sub_text = "바위... (SET)"
+                num_color = COLOR_WARNING
+            else:
+                count_num = "1"
+                sub_text = "보! / 탕! (SHOOT!)"
+                num_color = COLOR_DANGER
+
+            # 1. Header
             cv2.putText(
                 canvas,
                 "COUNTDOWN",
-                (ax + 190, ay + 100),
+                (ax + 195, ay + 75),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
                 COLOR_TEXT_MUTED,
                 2,
                 cv2.LINE_AA,
             )
-            cv2.putText(
-                canvas,
-                cur_word,
-                (ax + 70, ay + 220),
-                cv2.FONT_HERSHEY_DUPLEX,
-                1.3,
-                COLOR_SECONDARY,
-                3,
-                cv2.LINE_AA,
-            )
 
-            # Progress Bar
+            # 2. Huge 3, 2, 1 Number (Centered)
+            (tw, th), _ = cv2.getTextSize(count_num, cv2.FONT_HERSHEY_DUPLEX, 4.5, 8)
+            num_x = ax + (aw - tw) // 2
+            num_y = ay + 230
+            # Drop shadow
+            cv2.putText(canvas, count_num, (num_x + 4, num_y + 4), cv2.FONT_HERSHEY_DUPLEX, 4.5, (10, 10, 10), 9, cv2.LINE_AA)
+            cv2.putText(canvas, count_num, (num_x, num_y), cv2.FONT_HERSHEY_DUPLEX, 4.5, num_color, 8, cv2.LINE_AA)
+
+            # 3. Subtitle Description
+            (stw, sth), _ = cv2.getTextSize(sub_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+            sub_x = ax + (aw - stw) // 2
+            cv2.putText(canvas, sub_text, (sub_x, ay + 295), cv2.FONT_HERSHEY_SIMPLEX, 0.9, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
+
+            # 4. Animated Progress Bar
             prog = min(1.0, elapsed / self.countdown_duration)
-            cv2.rectangle(canvas, (ax + 50, ay + 300), (ax + aw - 50, ay + 320), (30, 30, 30), -1)
-            cv2.rectangle(canvas, (ax + 50, ay + 300), (ax + 50 + int((aw - 100) * prog), ay + 320), COLOR_PRIMARY, -1)
+            cv2.rectangle(canvas, (ax + 50, ay + 350), (ax + aw - 50, ay + 372), (30, 30, 30), -1)
+            cv2.rectangle(canvas, (ax + 50, ay + 350), (ax + 50 + int((aw - 100) * prog), ay + 372), num_color, -1)
+            cv2.rectangle(canvas, (ax + 50, ay + 350), (ax + aw - 50, ay + 372), COLOR_CARD_BORDER, 1)
+
+            # Also draw camera-side countdown circle badge
+            if display_frame is not None:
+                cx, cy = vx + vw - 60, vy + 60
+                cv2.circle(canvas, (cx, cy), 35, (20, 20, 20), -1)
+                cv2.circle(canvas, (cx, cy), 35, num_color, 3)
+                (ctw, cth), _ = cv2.getTextSize(count_num, cv2.FONT_HERSHEY_DUPLEX, 1.4, 3)
+                cv2.putText(canvas, count_num, (cx - ctw // 2, cy + cth // 2), cv2.FONT_HERSHEY_DUPLEX, 1.4, num_color, 3, cv2.LINE_AA)
 
         elif self.match_state == MatchState.RESULT:
             # Show Player vs AI moves
