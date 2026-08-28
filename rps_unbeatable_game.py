@@ -70,6 +70,13 @@ LOSING_COUNTER = {
 }
 
 
+def get_hand_posture(posture_name: str) -> np.ndarray:
+    name = posture_name.lower()
+    if name in ("neutral", "open"):
+        return np.zeros(16, dtype=np.float64)
+    return get_posture(name)
+
+
 class GameMode(Enum):
     GOD_MODE = "😈 무적 AI (100% 승리)"
     FAIR = "🎲 공정 모드 (50% 승률)"
@@ -201,7 +208,7 @@ class UnbeatableRpsApp:
             GameMode.TROLL_LOSE,
             GameMode.MIRROR,
         ]
-        self.auto_play = True  # Automatically trigger next round
+        self.auto_play = False  # Start manual with [Space], or toggle with [P]
 
         # State Machine
         self.match_state: MatchState = MatchState.IDLE
@@ -266,7 +273,7 @@ class UnbeatableRpsApp:
         self._send_robot_posture("neutral")
 
     def _send_robot_posture(self, posture_name: str) -> None:
-        angles = get_posture(posture_name)
+        angles = get_hand_posture(posture_name)
         if self.mujoco_controller is not None:
             self.mujoco_controller.set_target_degrees(angles)
             self.mujoco_controller.step_for(0.05)
