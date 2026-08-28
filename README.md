@@ -1,5 +1,7 @@
 # LEAP Hand vision prototype
 
+> 🎪 **전시회 / 부스 운영자 가이드**: 하드웨어 연결부터 3단계 사전 점검, 키오스크 앱 운영법은 [**BOOTH_OPERATOR_MANUAL.md**](file:///home/jiwoo/Documents/antigravity/charming-pascal/leap-hand/BOOTH_OPERATOR_MANUAL.md)를 참고하세요.
+
 노트북 웹캠과 MediaPipe Hand Landmarker로 손의 21개 랜드마크와 LEAP Hand에 대응하는 16개 사람 손 관절각을 실시간 확인하는 프로토타입입니다. 개인별 편 손/주먹 가동범위 보정 후 One Euro Filter와 데드밴드를 적용하고, 사람의 rock/paper/scissors 동작을 인식해 로봇 동작과 비교한 승패를 CSV에 기록합니다. MuJoCo 실시간 연동과 LEAP Hand v1 실물 제어용 안전 API도 포함하지만, 비전 스트림과 실물 모터의 직접 연동은 아직 활성화하지 않습니다.
 
 ## 1. 가상환경과 패키지 설치
