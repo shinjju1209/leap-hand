@@ -19,8 +19,8 @@
     <light pos="0 0 1" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
     
-    <!-- Manipulation Cube / Dice (7cm = 0.07m, half-extents = 0.035m) placed in palm cradle -->
-    <body name="cube" pos="0.005 0.030 0.155">
+    <!-- Stable s=0.95 grasp state from the official LEAP Hand grasp cache. -->
+    <body name="cube" pos="-0.020763 0.041853 0.170797" quat="0.997554 0.003869 0.014019 -0.068372">
       <freejoint name="cube_joint"/>
       <geom name="cube_geom" type="box" size="0.035 0.035 0.035" mass="0.10" material="cube_mat" friction="1.8 0.01 0.001"/>
     </body>

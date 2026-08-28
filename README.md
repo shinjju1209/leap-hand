@@ -297,20 +297,27 @@ MCP side + MCP flex + PIP flex + DIP flex = 손가락당 4 DoF
 
 ## 9. Sim-to-Real 강화학습(RL) Policy 배포
 
-Isaac Gym / Orbit / SAPIEN 등에서 학습된 Pre-trained In-Hand Manipulation Policy(예: 주사위/큐브 축 회전)를 MuJoCo 시뮬레이션 및 LEAP Hand 실물에 배포합니다.
+기본 설정은 official `models/LeapHand.pth`와 이에 맞는 안정 파지 상태를 사용해 큐브를 +Z축으로 회전합니다. Isaac의 관절 순서를 MuJoCo/실물의 `ANGLE_NAMES` 순서로 변환하고, 학습 당시의 20 Hz phase와 `1/24 rad` target 적분 크기를 유지합니다.
 
 ### 1) 실행 명령
 
 ```bash
-# 1. MuJoCo 시뮬레이션 환경에서 Policy 실행 (더미/테스트 또는 모델 파일 지정)
-python rl_sim2real_deploy.py --mode mujoco --policy models/cube_rotation.pt
+# 1. 기본 official Policy를 MuJoCo에서 실행
+python rl_sim2real_deploy.py --mode mujoco
+
+# GUI 없이 5초 자동 검증
+python rl_sim2real_deploy.py --mode mujoco --headless --auto-arm --duration 5
 
 # 2. 실물 하드웨어 단독 배포
-python rl_sim2real_deploy.py --mode hardware --policy models/cube_rotation.pt --port /dev/ttyUSB0
+python rl_sim2real_deploy.py --mode hardware \
+  --port /dev/ttyUSB0 \
+  --motor-calibration-file calibration/hardware_motors.yaml
 
 # 3. 실물 하드웨어 + MuJoCo 시뮬레이터 동시 실행 (Digital Twin 모드)
-python rl_sim2real_deploy.py --mode both --policy models/cube_rotation.pt
+python rl_sim2real_deploy.py --mode both --port /dev/ttyUSB0
 ```
+
+실물 모드는 저장된 모터별 편 손 원점과 방향을 필수로 사용합니다. 실행 직후 빈손으로 도달 가능한 cube-loading pose로 이동하고 그 자세를 유지합니다. `Cube-loading pose ready and holding` 문구를 확인한 다음 큐브를 지정된 파지 위치에 놓고 `A`를 누르세요. 큐브 지지 없이 도달하지 못하는 `middle_mcp_flex`를 포함해 정확한 MuJoCo policy grasp로 이동한 뒤 실측 관절값으로 policy/GRU를 초기화합니다. 실제 관절이 초기 목표의 12° 이내여야 policy가 시작되며, 실행 중 추종 오차가 25°를 넘으면 자동으로 Torque OFF 됩니다.
 
 ### 2) 조작 단축키 (GUI 창)
 
@@ -318,17 +325,19 @@ python rl_sim2real_deploy.py --mode both --policy models/cube_rotation.pt
 |---|---|---|
 | **`A`** | **ARM (Policy 실행 시작)** | 초기 파지 자세로 이동 후 실시간 Policy 추론 및 제어 시작 |
 | **`D` / `Space`** | **DISARM (비상 정지)** | Policy 제어 중단 및 하드웨어 토크 즉시 해제 |
-| **`R`** | **RESET** | 기본 조작 파지 자세(Default Grasp Pose)로 손가락 정렬 |
-| **`1` / `2`** | **회전 방향 전환** | `1`: 반시계(+1.0), `2`: 시계(-1.0) 방향 명령 전송 |
+| **`R`** | **RESET** | 손·큐브·속도·policy history/GRU를 하나의 초기 상태로 복원 |
+| **`1` / `2`** | **회전 방향 전환** | `1`: 학습된 +Z 방향, `2`: 실험적인 -Z 방향 |
 | **`Q` / `Esc`** | **종료** | 안전하게 Disarm 및 포트 종료 |
 
 ### 3) 주요 옵션
 
 - `--config configs/inhand_cube_rotation.yaml`: 기본 파지 자세 및 제어 파라미터 YAML 파일
 - `--control-hz 20.0`: Policy 추론 및 제어 루프 주기 (기본 20Hz)
-- `--action-scale 0.1`: Action $\to$ Radian 변환 스케일 ($q_{\text{target}} = q_{\text{default}} + \text{scale} \times a$)
+- `--action-scale 0.0416666667`: target 적분 스케일. official checkpoint는 학습값 `1/24` 권장
 - `--ema-alpha 0.8`: Sim-to-Real 떨림 방지를 위한 Action 지수이동평균(EMA) 필터 계수
 - `--current-limit 350`: 파지/조작용 전류 제한 (mA)
+
+큐브가 낙하하면 손과 큐브만 순간 이동시키지 않고 policy의 history와 GRU까지 함께 초기화합니다. 이 checkpoint는 +Z 회전으로 학습되었으므로 `2`의 역방향 동작은 동일한 성능을 보장하지 않습니다.
 
 ## 10. 전시회 및 부스 운영용 종합 키오스크 UI (`booth_app.py`)
 
@@ -355,5 +364,3 @@ python booth_app.py --mode both --port /dev/ttyUSB0
 | **🖐️ 텔레오퍼레이션** | 웹캠 실시간 1:1 손 추적, 스켈레톤 시각화, 원유로 떨림 필터링 | `C` (편 손 보정), `F` (주먹 보정), `A` (Arm/추적 시작), `D`/`Space` (Disarm), `R` (보정 리셋), `H` (홈) |
 | **✂️ 가위바위보 대결** | **3-2-1 대형 카운트다운**, 로봇 무작위 수 출력, 관람객 손 제스처 실시간 인식, 승/패/무 판정, 스코어보드 통계 | `Space` (라운드 시작), `P` (연속 자동 대결 ON/OFF), `R` (점수 초기화), `H` (홈) |
 | **🎭 제스처 쇼케이스** | **3D 시뮬레이터 내장 뷰포트**, 원클릭 포즈 시연 (바위/보/가위/편손/중지/엄지척/OK사인/가리키기/락앤롤) 및 **동적 웨이브/인사 애니메이션** | `1` (바위), `2` (보), `3` (가위), `4` (편 손), `5` (중지), `6` (엄지 척), `7` (OK 사인), `8` (가리키기), `9` (락앤롤), `W` (핑거 웨이브), `V` (손 인사), `H` (홈) |
-
-

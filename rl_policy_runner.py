@@ -120,11 +120,20 @@ class TorchScriptPolicyBackend(PolicyBackend):
         return np.asarray(action_np, dtype=np.float64).reshape(16)
 
 
-# Official LEAP_Hand_Sim joint permutations and canonical limits
-# Isaac Gym order: Index(0~3), Thumb(4~7), Middle(8~11), Ring(12~15)
-# REAL / ANGLE_NAMES order: Index(0~3), Middle(4~7), Ring(8~11), Thumb(12~15)
-OFFICIAL_REAL_TO_SIM = np.array([0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7, 8, 9, 10, 11], dtype=np.int64)
-OFFICIAL_SIM_TO_REAL = np.array([0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 4, 5, 6, 7], dtype=np.int64)
+# Official LEAP_Hand_Sim joint permutations and canonical limits.
+#
+# Isaac Gym walks the URDF kinematic tree, so the first two joints of the
+# index, middle, and ring fingers are flex-before-side.  ANGLE_NAMES and the
+# hardware interface are side-before-flex and group the thumb last.  These
+# exact permutations are also stored in the official pretrained run config.
+OFFICIAL_REAL_TO_SIM = np.array(
+    [1, 0, 2, 3, 12, 13, 14, 15, 5, 4, 6, 7, 9, 8, 10, 11],
+    dtype=np.int64,
+)
+OFFICIAL_SIM_TO_REAL = np.array(
+    [1, 0, 2, 3, 9, 8, 10, 11, 13, 12, 14, 15, 4, 5, 6, 7],
+    dtype=np.int64,
+)
 
 OFFICIAL_CANONICAL_POSE_SIM = np.array([
     0.2078, -0.9765, 1.7760, -0.1653,
@@ -134,18 +143,23 @@ OFFICIAL_CANONICAL_POSE_SIM = np.array([
 ], dtype=np.float64)
 OFFICIAL_CANONICAL_POSE_REAL = OFFICIAL_CANONICAL_POSE_SIM[OFFICIAL_SIM_TO_REAL]
 
+# Limits from the public LEAP_Hand_Sim assets/leap_hand/robot.urdf, reordered
+# into Isaac Gym's kinematic-tree DOF order.  The checkpoint's running input
+# statistics were trained with these exact ranges; using the wider hardware
+# safety limits makes the normalized observation several standard deviations
+# out of distribution and drives the policy targets into saturation.
 OFFICIAL_DOF_LOWER = np.array([
-    -1.5716, -0.4416, -1.2216, -1.3416,
-    -0.519205, -0.57159, -0.25159, -1.3416,
-    -1.5716, -0.4416, -1.2216, -1.3416,
-    -1.5716, -0.4416, -1.2216, -1.3416,
+    -0.314, -1.047, -0.506, -0.366,
+    -0.349, -0.470, -1.200, -1.340,
+    -0.314, -1.047, -0.506, -0.366,
+    -0.314, -1.047, -0.506, -0.366,
 ], dtype=np.float64)
 
 OFFICIAL_DOF_UPPER = np.array([
-    1.5584, 1.8584, 1.8584, 1.8584,
-    1.7408, 1.96841, 1.8584, 1.8584,
-    1.5584, 1.8584, 1.8584, 1.8584,
-    1.5584, 1.8584, 1.8584, 1.8584,
+    2.230, 1.047, 1.885, 2.042,
+    2.094, 2.443, 1.900, 1.880,
+    2.230, 1.047, 1.885, 2.042,
+    2.230, 1.047, 1.885, 2.042,
 ], dtype=np.float64)
 
 
@@ -171,6 +185,7 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
         self.device = torch.device(device)
         self.action_scale = float(action_scale)
         self.phase_period = float(phase_period)
+        self.control_dt = 0.05
         self.history: deque[np.ndarray] = deque(maxlen=3)
 
         data = torch.load(str(self.model_path), map_location=self.device, weights_only=False)
@@ -224,7 +239,7 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
                 if obs.ndim == 1:
                     obs = obs.unsqueeze(0)
                 obs_f32 = obs.to(torch.float32)
-                std = torch.sqrt(self.running_var + 1e-8)
+                std = torch.sqrt(self.running_var + 1e-5)
                 norm_obs = torch.clamp((obs_f32 - self.running_mean) / std, -5.0, 5.0)
                 if norm_obs.ndim == 2:
                     norm_obs = norm_obs.unsqueeze(1)
@@ -239,7 +254,8 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
         self.model = OfficialActor().to(self.device)
         self.model.eval()
 
-        self.sim_target = OFFICIAL_CANONICAL_POSE_SIM.copy()
+        self.initial_target_sim = OFFICIAL_CANONICAL_POSE_SIM.copy()
+        self.sim_target = self.initial_target_sim.copy()
         self.step_counter = 0
         self._init_history()
 
@@ -255,9 +271,34 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
 
     def reset(self) -> None:
         self.model.reset_hidden()
-        self.sim_target = OFFICIAL_CANONICAL_POSE_SIM.copy()
+        self.sim_target = self.initial_target_sim.copy()
         self.step_counter = 0
         self._init_history()
+
+    def reset_from_real_pose(self, pose_real: Sequence[float]) -> None:
+        """Seed recurrent state and integrated target from measured hardware pose.
+
+        The official real-world deployer initializes all three history frames and
+        ``prev_target`` from the post-grasp encoder feedback.  Reusing the nominal
+        cache pose here makes the recurrent policy diverge from its MuJoCo rollout
+        even when the physical grasp differs by only a degree or two.
+        """
+        real = _vector16(pose_real, "pose_real")
+        self.model.reset_hidden()
+        self.sim_target = real[OFFICIAL_REAL_TO_SIM].copy()
+        self.step_counter = 0
+        self._init_history()
+
+    def set_initial_pose_real(self, pose_real: Sequence[float]) -> None:
+        """Set the episode grasp pose supplied in ANGLE_NAMES order."""
+        real = _vector16(pose_real, "pose_real")
+        initial_sim = real[OFFICIAL_REAL_TO_SIM]
+        if np.any(initial_sim < OFFICIAL_DOF_LOWER) or np.any(
+            initial_sim > OFFICIAL_DOF_UPPER
+        ):
+            raise ValueError("official policy initial pose is outside its DOF limits")
+        self.initial_target_sim = initial_sim.copy()
+        self.reset()
 
     def __call__(
         self, obs: np.ndarray, target_command: float = 1.0
@@ -272,10 +313,12 @@ class LeapHandOfficialPolicyBackend(PolicyBackend):
         obs_arr = np.asarray(obs, dtype=np.float32)
         if obs_arr.size < 102:
             # Build official 102-dim observation from current actual joint state
-            t_sec = self.step_counter * 0.05
+            t_sec = self.step_counter * self.control_dt
+            direction = 1.0 if target_command >= 0.0 else -1.0
+            phase_angle = direction * 2.0 * np.pi * t_sec / self.phase_period
             phase = np.array([
-                target_command * np.sin(2.0 * np.pi * t_sec / self.phase_period),
-                target_command * np.cos(2.0 * np.pi * t_sec / self.phase_period),
+                np.sin(phase_angle),
+                np.cos(phase_angle),
             ], dtype=np.float32)
             if obs_arr.size >= 16:
                 cur_sim = obs_arr[:16][OFFICIAL_REAL_TO_SIM].astype(np.float64)
@@ -667,6 +710,10 @@ class RLPolicyRunner:
             ema_alpha=ema_alpha,
         )
         self._last_action = np.zeros(16, dtype=np.float64)
+        if isinstance(self.policy, LeapHandOfficialPolicyBackend):
+            self.policy.action_scale = self.action_processor.action_scale
+            self.policy.control_dt = self.control_dt
+            self.policy.set_initial_pose_real(self.default_joint_pose)
 
     @property
     def last_action(self) -> np.ndarray:
@@ -725,11 +772,33 @@ class RLPolicyRunner:
         if hasattr(self.policy, "reset") and callable(self.policy.reset):
             self.policy.reset()
 
+    def reset_from_joint_feedback(
+        self,
+        current_joint_angles: Sequence[float],
+        *,
+        is_degrees: bool = True,
+    ) -> None:
+        """Reset an episode using the measured post-transition joint pose."""
+        angles = _vector16(current_joint_angles, "current_joint_angles")
+        current_rad = np.deg2rad(angles) if is_degrees else angles
+        self.obs_manager.reset()
+        self.action_processor.reset()
+        self._last_action = np.zeros(16, dtype=np.float64)
+        if isinstance(self.policy, LeapHandOfficialPolicyBackend):
+            self.policy.reset_from_real_pose(current_rad)
+        elif hasattr(self.policy, "reset") and callable(self.policy.reset):
+            self.policy.reset()
+
 
 __all__ = [
     "DEFAULT_MANIPULATION_POSE_RADIANS",
+    "OFFICIAL_DOF_LOWER",
+    "OFFICIAL_DOF_UPPER",
+    "OFFICIAL_REAL_TO_SIM",
+    "OFFICIAL_SIM_TO_REAL",
     "ActionProcessor",
     "CallablePolicyBackend",
+    "LeapHandOfficialPolicyBackend",
     "ObservationManager",
     "OnnxPolicyBackend",
     "PolicyBackend",

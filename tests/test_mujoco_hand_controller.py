@@ -22,6 +22,26 @@ class MujocoHandControllerTests(unittest.TestCase):
         self.assertEqual(len(INPUT_TO_ACTUATOR), 16)
         self.assertEqual(len(set(self.controller.actuator_ids.tolist())), 16)
 
+    def test_rl_gain_override_does_not_change_default_controller(self):
+        default_ids = self.controller.actuator_ids
+        np.testing.assert_allclose(
+            self.controller.model.actuator_gainprm[default_ids, 0], 12.0
+        )
+        rl_controller = MujocoHandController(position_kp=3.0, velocity_kv=0.1)
+        try:
+            rl_ids = rl_controller.actuator_ids
+            np.testing.assert_allclose(
+                rl_controller.model.actuator_gainprm[rl_ids, 0], 3.0
+            )
+            np.testing.assert_allclose(
+                rl_controller.model.actuator_biasprm[rl_ids, 1], -3.0
+            )
+            np.testing.assert_allclose(
+                rl_controller.model.actuator_biasprm[rl_ids, 2], -0.1
+            )
+        finally:
+            rl_controller.close()
+
     def test_human_order_is_written_to_named_actuators(self):
         angles = np.array(
             [5.0, 10.0, 15.0, 20.0] * 3 + [5.0, 10.0, 15.0, 20.0]

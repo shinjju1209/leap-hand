@@ -126,6 +126,25 @@ python booth_app.py --mode mujoco
 python booth_app.py --mode both --port /dev/ttyUSB0
 ```
 
+### 3) RL 큐브 회전 단독 시연
+
+```bash
+# 기본 official policy + 안정 파지 상태로 MuJoCo 시연
+python rl_sim2real_deploy.py --mode mujoco
+```
+
+MuJoCo 창에서 `A`를 누르면 +Z축 회전을 시작하고, `R`은 손·큐브·policy 내부 상태를 모두 초기화합니다. 큐브가 떨어져도 같은 전체 초기화가 자동 실행됩니다. 기본 checkpoint는 +Z 방향으로 학습되었으므로 현장 시연에서는 `1` 방향을 사용합니다.
+
+실물에서 시연하기 전에는 모터 점검을 통과하고 `calibration/hardware_motors.yaml`이 현재 장비에서 기록한 파일인지 확인합니다.
+
+```bash
+python rl_sim2real_deploy.py --mode hardware \
+  --port /dev/ttyUSB0 \
+  --motor-calibration-file calibration/hardware_motors.yaml
+```
+
+실행 직후에는 큐브를 넣지 말고 손 주변을 비워 둡니다. 정확한 policy grasp는 큐브 지지가 없으면 실물 `middle_mcp_flex`가 도달하지 못하므로, 프로그램은 이 관절만 약 `+8.3°`로 완화한 cube-loading pose로 4초 동안 이동한 뒤 `Cube-loading pose ready and holding`을 출력하며 대기합니다. 이 문구를 확인한 다음 큐브를 손바닥에 놓고 `A`를 누릅니다. 그러면 큐브가 손가락을 지지하는 상태에서 정확한 MuJoCo 초기 grasp로 이동·검증하고, 실측 관절값으로 policy/GRU를 초기화하여 회전을 시작합니다. 이동 방향이 이상하거나 큐브가 끼면 즉시 `Space`를 누르고 5V 전원을 차단합니다. calibration 파일이 없으면 실물 RL 모드는 안전상 실행되지 않습니다.
+
 ---
 
 ## 6. 🖐️ 체험 모드별 상세 운영 & 관람객 안내 가이드

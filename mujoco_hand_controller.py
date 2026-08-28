@@ -66,6 +66,8 @@ class MujocoHandController:
         *,
         signs: Sequence[float] | None = None,
         offsets_degrees: Sequence[float] | None = None,
+        position_kp: float | None = None,
+        velocity_kv: float | None = None,
     ) -> None:
         self.model_path = Path(model_path).resolve()
         if not self.model_path.is_file():
@@ -102,6 +104,16 @@ class MujocoHandController:
         ]
         if missing:
             raise ValueError(f"MuJoCo model is missing actuators: {missing}")
+
+        if position_kp is not None:
+            if not np.isfinite(position_kp) or position_kp <= 0.0:
+                raise ValueError("position_kp must be finite and positive")
+            self.model.actuator_gainprm[self.actuator_ids, 0] = position_kp
+            self.model.actuator_biasprm[self.actuator_ids, 1] = -position_kp
+        if velocity_kv is not None:
+            if not np.isfinite(velocity_kv) or velocity_kv < 0.0:
+                raise ValueError("velocity_kv must be finite and non-negative")
+            self.model.actuator_biasprm[self.actuator_ids, 2] = -velocity_kv
 
         joint_ids = self.model.actuator_trnid[self.actuator_ids, 0]
         self.qpos_addresses = self.model.jnt_qposadr[joint_ids]
@@ -260,6 +272,10 @@ class MujocoHandController:
             raise ValueError("steps must be a positive integer")
         for _ in range(steps):
             mujoco.mj_step(self.model, self.data)
+
+    def forward(self) -> None:
+        """Recompute kinematics and contacts after directly resetting state."""
+        mujoco.mj_forward(self.model, self.data)
 
     def step_for(self, duration_seconds: float) -> int:
         """Advance by approximately ``duration_seconds`` and return step count."""

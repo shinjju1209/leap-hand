@@ -10,6 +10,10 @@ import numpy as np
 
 from rl_policy_runner import (
     DEFAULT_MANIPULATION_POSE_RADIANS,
+    OFFICIAL_DOF_LOWER,
+    OFFICIAL_DOF_UPPER,
+    OFFICIAL_REAL_TO_SIM,
+    OFFICIAL_SIM_TO_REAL,
     ActionProcessor,
     CallablePolicyBackend,
     ObservationManager,
@@ -124,6 +128,73 @@ class ActionProcessorTests(unittest.TestCase):
 
 
 class RLPolicyRunnerTests(unittest.TestCase):
+    def test_official_joint_permutations_are_exact_inverses(self):
+        expected_real_to_sim = np.array(
+            [1, 0, 2, 3, 12, 13, 14, 15, 5, 4, 6, 7, 9, 8, 10, 11]
+        )
+        np.testing.assert_array_equal(OFFICIAL_REAL_TO_SIM, expected_real_to_sim)
+        np.testing.assert_array_equal(
+            OFFICIAL_SIM_TO_REAL[OFFICIAL_REAL_TO_SIM], np.arange(16)
+        )
+
+    def test_official_limits_match_training_urdf(self):
+        np.testing.assert_allclose(
+            OFFICIAL_DOF_LOWER,
+            [
+                -0.314, -1.047, -0.506, -0.366,
+                -0.349, -0.470, -1.200, -1.340,
+                -0.314, -1.047, -0.506, -0.366,
+                -0.314, -1.047, -0.506, -0.366,
+            ],
+        )
+        np.testing.assert_allclose(
+            OFFICIAL_DOF_UPPER,
+            [
+                2.230, 1.047, 1.885, 2.042,
+                2.094, 2.443, 1.900, 1.880,
+                2.230, 1.047, 1.885, 2.042,
+                2.230, 1.047, 1.885, 2.042,
+            ],
+        )
+
+    def test_configured_grasp_is_inside_official_joint_limits(self):
+        from rl_sim2real_deploy import DEFAULT_CONFIG_PATH, load_yaml_config
+
+        cfg = load_yaml_config(DEFAULT_CONFIG_PATH)
+        pose_real = np.asarray(cfg["default_joint_pose_radians"])
+        pose_sim = pose_real[OFFICIAL_REAL_TO_SIM]
+        self.assertTrue(np.all(pose_sim >= OFFICIAL_DOF_LOWER))
+        self.assertTrue(np.all(pose_sim <= OFFICIAL_DOF_UPPER))
+
+    def test_official_policy_reset_uses_measured_hardware_pose_for_all_history(self):
+        from rl_sim2real_deploy import DEFAULT_CONFIG_PATH, load_yaml_config
+
+        cfg = load_yaml_config(DEFAULT_CONFIG_PATH)
+        pose_real = np.asarray(cfg["default_joint_pose_radians"], dtype=np.float64)
+        measured_real = pose_real.copy()
+        measured_real[1] += np.deg2rad(1.25)
+        runner = RLPolicyRunner(
+            policy=Path(__file__).resolve().parents[1] / "models" / "LeapHand.pth",
+            default_joint_pose_radians=pose_real,
+            control_hz=20.0,
+            action_scale=1.0 / 24.0,
+        )
+
+        runner.reset_from_joint_feedback(measured_real, is_degrees=False)
+
+        expected_sim = measured_real[OFFICIAL_REAL_TO_SIM]
+        np.testing.assert_allclose(runner.policy.sim_target, expected_sim)
+        self.assertEqual(runner.policy.step_counter, 0)
+        self.assertIsNone(runner.policy.model.hidden_state)
+        self.assertEqual(len(runner.policy.history), 3)
+        expected_unscaled = (
+            2.0 * expected_sim - OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER
+        ) / (OFFICIAL_DOF_UPPER - OFFICIAL_DOF_LOWER)
+        for chunk in runner.policy.history:
+            np.testing.assert_allclose(chunk[:16], expected_unscaled, rtol=1e-6)
+            np.testing.assert_allclose(chunk[16:32], expected_sim, rtol=1e-6)
+            np.testing.assert_allclose(chunk[32:], [0.0, 1.0])
+
     def test_runner_with_callable_policy(self):
         def mock_policy(obs: np.ndarray) -> np.ndarray:
             return np.ones(16) * 0.5
