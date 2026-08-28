@@ -579,7 +579,8 @@ class BoothKioskApp:
         if self.enable_mujoco:
             try:
                 self.mujoco_controller = MujocoHandController()
-                self.mujoco_controller.launch_viewer()
+                if self.mode in ("mujoco", "both"):
+                    self.mujoco_controller.launch_viewer()
                 self.status_message = "MuJoCo 3D simulation connected."
             except Exception as e:
                 print(f"[BOOTH WARN] MuJoCo simulation launch skipped: {e}")
@@ -1425,7 +1426,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    enable_mujoco = not args.no_mujoco and args.mode in ("mujoco", "both")
+    enable_mujoco = not args.no_mujoco
     enable_hardware = not args.no_hardware and args.mode in ("hardware", "both")
 
     app = BoothKioskApp(
