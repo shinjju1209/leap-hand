@@ -299,6 +299,24 @@ MCP side + MCP flex + PIP flex + DIP flex = 손가락당 4 DoF
 
 기본 설정은 official `models/LeapHand.pth`와 이에 맞는 안정 파지 상태를 사용해 큐브를 +Z축으로 회전합니다. Isaac의 관절 순서를 MuJoCo/실물의 `ANGLE_NAMES` 순서로 변환하고, 학습 당시의 20 Hz phase와 `1/24 rad` target 적분 크기를 유지합니다.
 
+선택 사항으로, 조립 오차를 기계적으로 다시 맞추지 않고 실제 안정 파지를 policy 시작 자세에 가상 정렬할 수 있습니다. 기존 편 손 보정과 기본 RL 흐름은 바뀌지 않습니다. 아래 별도 도구는 기존 보정의 motor ID와 `sign`을 유지한 새 policy 보정 파일을 만들며, Torque를 켜거나 모터를 움직이지 않습니다. 큐브를 넣고 손가락을 원하는 안정 파지에 수동으로 놓은 뒤 정확히 `ANCHOR`를 입력합니다.
+
+```bash
+python leap_hand_policy_grasp_calibration.py \
+  --port /dev/ttyUSB0 \
+  --base-calibration-file calibration/hardware_motors_local.yaml \
+  --config configs/inhand_cube_rotation.yaml \
+  --output calibration/hardware_motors_policy.yaml
+```
+
+현재 raw motor 자세를 16개 모두 `0°`로 만드는 것이 아니라, config의 `default_joint_pose_radians`와 같은 자세로 표시하도록 가상 영점을 계산합니다. 따라서 이후 policy 목표 변화도 같은 고정 offset을 사용하며 시작 파지에 상대적인 motion이 보존됩니다. 출력 파일을 먼저 hardware check로 확인한 뒤 RL 배포에 사용합니다.
+
+```bash
+python leap_hand_hardware_check.py \
+  --port /dev/ttyUSB0 \
+  --motor-calibration-file calibration/hardware_motors_policy.yaml
+```
+
 ### 1) 실행 명령
 
 ```bash

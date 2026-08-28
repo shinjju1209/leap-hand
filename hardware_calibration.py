@@ -80,6 +80,41 @@ class HardwareMotorCalibration:
         )
 
     @classmethod
+    def from_reference_pose_samples(
+        cls,
+        motor_ids: Sequence[int],
+        samples_motor_radians: Sequence[Sequence[float]],
+        reference_sim_radians: Sequence[float],
+        *,
+        signs: Sequence[float] | None = None,
+    ) -> "HardwareMotorCalibration":
+        """Anchor measured raw positions to a known 16-joint simulation pose.
+
+        A reference pose does not become all-zero. Instead, the returned zero
+        offsets make the median measured raw pose decode to
+        ``reference_sim_radians``. Commands after that pose use the same fixed
+        offsets, preserving all policy motion relative to the anchor.
+        """
+        samples = np.asarray(samples_motor_radians, dtype=np.float64)
+        if samples.ndim != 2 or samples.shape[0] < 3 or samples.shape[1] != 16:
+            raise ValueError("samples_motor_radians must have shape (at least 3, 16)")
+        if not np.all(np.isfinite(samples)):
+            raise ValueError("samples_motor_radians contains NaN or infinity")
+        reference = _vector16(reference_sim_radians, "reference_sim_radians")
+        direction = _vector16(
+            np.ones(16, dtype=np.float64) if signs is None else signs,
+            "signs",
+        )
+        if not np.all(np.isin(direction, (-1.0, 1.0))):
+            raise ValueError("signs must contain only -1 or 1")
+        median_raw = np.median(samples, axis=0)
+        return cls(
+            tuple(motor_ids),
+            median_raw - direction * reference,
+            direction,
+        )
+
+    @classmethod
     def load(cls, path: str | Path) -> "HardwareMotorCalibration":
         source = Path(path)
         try:

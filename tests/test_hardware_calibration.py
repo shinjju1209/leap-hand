@@ -71,6 +71,32 @@ class HardwareMotorCalibrationTests(unittest.TestCase):
             np.linspace(3.0, 3.3, 16),
         )
 
+    def test_reference_pose_samples_decode_to_the_reference_pose(self):
+        reference = np.linspace(-0.4, 1.1, 16)
+        virtual_zero = np.linspace(2.6, 3.5, 16)
+        signs = np.asarray([1.0, -1.0] * 8)
+        raw_reference = virtual_zero + signs * reference
+        samples = np.tile(raw_reference, (5, 1))
+        samples[0] += 0.2
+        samples[-1] -= 0.2
+
+        calibration = HardwareMotorCalibration.from_reference_pose_samples(
+            tuple(range(16)),
+            samples,
+            reference,
+            signs=signs,
+        )
+
+        np.testing.assert_allclose(calibration.open_motor_radians, virtual_zero)
+        np.testing.assert_allclose(
+            calibration.motor_to_sim_radians(raw_reference),
+            reference,
+        )
+        np.testing.assert_allclose(
+            calibration.sim_to_motor_radians(reference),
+            raw_reference,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

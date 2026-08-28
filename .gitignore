@@ -3,3 +3,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 rps_results.csv
+
+# Machine-specific LEAP Hand calibration and hardware test output.
+calibration/hardware_motors_local.yaml
+calibration/hardware_motors_policy*.yaml
+diagnostics/
