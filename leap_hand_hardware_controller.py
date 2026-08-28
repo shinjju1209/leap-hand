@@ -260,6 +260,13 @@ class LeapHandHardwareController:
                 )
 
             self._set_torque(False)
+            # Clear any latched watchdog alarms from prior runs immediately
+            for motor_id in self.motor_ids:
+                try:
+                    self._write_register(motor_id, ADDR_BUS_WATCHDOG, 1, 0)
+                except Exception:
+                    pass
+
             self._feedback_reader = self._sdk.GroupSyncRead(
                 self._port_handler,
                 self._packet_handler,
@@ -286,8 +293,13 @@ class LeapHandHardwareController:
         if self._torque_enabled:
             raise RuntimeError("Disable torque before configuring motors")
 
+        watchdog_ticks = min(127, ceil(self.bus_watchdog_milliseconds / 20.0))
         for motor_id in self.motor_ids:
+            # 1. Clear watchdog first to unblock RAM register writes
+            self._write_register(motor_id, ADDR_BUS_WATCHDOG, 1, 0)
+            # 2. Set operating mode
             self._write_register(motor_id, ADDR_OPERATING_MODE, 1, CURRENT_BASED_POSITION_MODE)
+            # 3. Set PID gains
             p_gain = self.position_p_gain
             d_gain = self.position_d_gain
             if motor_id in self._side_motor_ids:
@@ -296,17 +308,14 @@ class LeapHandHardwareController:
             self._write_register(motor_id, ADDR_POSITION_P_GAIN, 2, p_gain)
             self._write_register(motor_id, ADDR_POSITION_I_GAIN, 2, self.position_i_gain)
             self._write_register(motor_id, ADDR_POSITION_D_GAIN, 2, d_gain)
+            # 4. Set current limit
             self._write_register(
                 motor_id,
                 ADDR_GOAL_CURRENT,
                 2,
                 self.current_limit_milliamps,
             )
-
-        watchdog_ticks = min(127, ceil(self.bus_watchdog_milliseconds / 20.0))
-        for motor_id in self.motor_ids:
-            # Writing zero also clears a latched watchdog error from a prior run.
-            self._write_register(motor_id, ADDR_BUS_WATCHDOG, 1, 0)
+            # 5. Enable watchdog protection for runtime safety
             self._write_register(motor_id, ADDR_BUS_WATCHDOG, 1, watchdog_ticks)
         self._configured = True
 
