@@ -355,13 +355,32 @@ python rl_sim2real_deploy.py --mode both --port /dev/ttyUSB0
 재배향 정책, MuJoCo 장면이 모두 저장소에 들어 있고 LFS 도 쓰지 않으므로
 clone 후 `pip install -r requirements.txt` 면 끝입니다.
 
+이 저장소는 **비공개**입니다. 받는 사람이 저장소에 초대되어 있어야 하고,
+`gh auth login` 이나 SSH 키로 인증이 되어 있어야 합니다. 둘 중 하나라도
+빠지면 clone 은 `repository not found` 로 실패합니다 — 비공개 저장소는
+권한이 없을 때 존재 자체를 숨기므로, 오타와 권한 문제가 같은 메시지로
+나옵니다.
+
 ```bash
+# 저장소 소유자가 먼저 초대합니다
+gh api -X PUT repos/shinjju1209/leap-hand/collaborators/<github-id> -f permission=pull
+
+# 받는 쪽
+gh auth login
 git clone https://github.com/shinjju1209/leap-hand
 cd leap-hand
 git checkout feat/booth-shape-ui
 # 이후 1절의 가상환경 설치 절차를 그대로 따릅니다
 
 python booth_app.py --mode mujoco --no-hardware   # 하드웨어 없이 확인
+```
+
+계정을 붙이기 번거로운 전시장 노트북이라면 파일을 그대로 옮겨도 됩니다.
+저장소가 자립적이므로 `.git` 없이도 실행됩니다.
+
+```bash
+cd ~/Projects
+tar czf leap-hand-booth.tar.gz --exclude=.venv --exclude=.git leap-hand/
 ```
 
 실물 손을 붙이려면 시리얼 포트 접근 권한이 필요합니다.
