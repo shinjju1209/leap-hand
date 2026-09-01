@@ -509,7 +509,10 @@ def viewport(
 
     if frame is not None:
         inner_x, inner_y, inner_w, inner_h = x + 5, y + 5, w - 10, h - 10
-        resized = cv2.resize(frame, (inner_w, inner_h), interpolation=cv2.INTER_AREA)
+        # INTER_LINEAR, not INTER_AREA: the camera frame is being enlarged
+        # here, and AREA is the downscaling filter -- slower, and no better
+        # going up.
+        resized = cv2.resize(frame, (inner_w, inner_h))
         corners = _corner_mask(inner_w, inner_h, RADIUS_WELL)
         region = canvas[inner_y:inner_y + inner_h, inner_x:inner_x + inner_w]
         # Only the corners are blended; the rest is a straight copy. Masking the
@@ -595,7 +598,10 @@ class Button:
         # per frame was about 4.7 ms of a redraw on the busier screens. Cards
         # keep theirs, and any button lifts when it is pointed at.
         if self.enabled and (hovered or self.active or is_card):
-            soft_shadow(canvas, self.rect, radius, spread=12, strength=0.13)
+            # Buttons sit on the page and never on each other, so the composite
+            # is cacheable the same way the viewport's is.
+            soft_shadow(canvas, self.rect, radius, spread=12, strength=0.13,
+                        ground=COLOR_BG)
 
         rounded_rect(canvas, self.rect, fill, radius, -1)
         rounded_rect(canvas, self.rect, border, radius, 1)
