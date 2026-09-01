@@ -1,6 +1,6 @@
 # LEAP Hand vision prototype
 
-> 🎪 **전시회 / 부스 운영자 가이드**: 하드웨어 연결부터 3단계 사전 점검, 키오스크 앱 운영법은 [**BOOTH_OPERATOR_MANUAL.md**](file:///home/jiwoo/Documents/antigravity/charming-pascal/leap-hand/BOOTH_OPERATOR_MANUAL.md)를 참고하세요.
+> 🎪 **전시회 / 부스 운영자 가이드**: 하드웨어 연결부터 3단계 사전 점검, 키오스크 앱 운영법은 [**BOOTH_OPERATOR_MANUAL.md**](BOOTH_OPERATOR_MANUAL.md)를 참고하세요.
 
 노트북 웹캠과 MediaPipe Hand Landmarker로 손의 21개 랜드마크와 LEAP Hand에 대응하는 16개 사람 손 관절각을 실시간 확인하는 프로토타입입니다. 개인별 편 손/주먹 가동범위 보정 후 One Euro Filter와 데드밴드를 적용하고, 사람의 rock/paper/scissors 동작을 인식해 로봇 동작과 비교한 승패를 CSV에 기록합니다. MuJoCo 실시간 연동과 LEAP Hand v1 실물 제어용 안전 API도 포함하지만, 비전 스트림과 실물 모터의 직접 연동은 아직 활성화하지 않습니다.
 
@@ -45,6 +45,12 @@ Invoke-WebRequest `
 Google DeepMind MuJoCo Menagerie의 LEAP Hand 오른손 MJCF 모델과 필요한 메시를 `models/mujoco/leap_hand`에 포함합니다. 실행 장면 파일은 `models/mujoco/leap_hand/scene_right.xml`이며, 원본 모델의 MIT 라이선스와 README도 같은 폴더에 보존합니다.
 
 `MujocoHandController`는 현재 비전 코드의 16개 각도 순서를 MuJoCo actuator 순서로 변환하고, degree→radian 변환과 관절 한계 제한을 수행합니다.
+
+큐브 재배향 데모(10절)가 쓰는 장면은 이것과 별개입니다. MuJoCo Playground의
+`scene_mjx_cube.xml`과 그 메시·텍스처를 `assets/reorient_scene/`에 함께
+포함하므로(28개 파일, 8 MB) Playground 체크아웃을 따로 받을 필요가 없습니다.
+두 모델은 목적이 다릅니다 — `scene_right.xml`은 실물 손과 일치해야 하는
+디지털 트윈이고, `scene_mjx_cube.xml`은 정책이 학습된 환경입니다.
 
 ```python
 from mujoco_hand_controller import MujocoHandController
@@ -343,42 +349,36 @@ python rl_sim2real_deploy.py --mode both --port /dev/ttyUSB0
 
 관람객 체험 및 전시회 시연을 위한 원터치 터치스크린/키보드 지원 종합 키오스크 애플리케이션입니다.
 
-### 0) 다른 장비에 설치하기
+### 0) 다른 장비에서 실행하기
 
-부스에 필요한 것은 이 저장소가 전부 들고 있습니다. MediaPipe 손 모델,
-재배향 정책, MuJoCo 장면과 메시까지 커밋되어 있으므로 clone 후 의존성만
-설치하면 됩니다. LFS 도 쓰지 않습니다.
+설치는 1절과 같습니다. 부스 앱이 추가로 요구하는 것은 없습니다 — 손 모델,
+재배향 정책, MuJoCo 장면이 모두 저장소에 들어 있고 LFS 도 쓰지 않으므로
+clone 후 `pip install -r requirements.txt` 면 끝입니다.
 
 ```bash
 git clone https://github.com/shinjju1209/leap-hand
 cd leap-hand
 git checkout feat/booth-shape-ui
+# 이후 1절의 가상환경 설치 절차를 그대로 따릅니다
 
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-# 하드웨어 없이 확인
-python booth_app.py --mode mujoco --no-hardware
+python booth_app.py --mode mujoco --no-hardware   # 하드웨어 없이 확인
 ```
 
-실물 손을 붙이려면 시리얼 포트에 접근 권한이 있어야 합니다.
+실물 손을 붙이려면 시리얼 포트 접근 권한이 필요합니다.
 
 ```bash
 sudo usermod -aG dialout $USER      # 로그아웃 후 다시 로그인
-python booth_app.py --mode hardware --port /dev/ttyUSB0
 ```
 
-설치가 제대로 됐는지는 테스트로 확인할 수 있습니다. 하드웨어도 카메라도
-필요 없습니다.
+설치 확인은 테스트로 합니다. 하드웨어도 카메라도 필요 없습니다.
 
 ```bash
 python -m unittest tests.test_booth_theme tests.test_cube_reorient tests.test_booth_app
 ```
 
-> `torch` 와 `onnxruntime` 은 `requirements.txt` 에 있지만 부스 앱은 쓰지
-> 않습니다. 별도의 RL 배포 스크립트용이라, 부스만 돌릴 것이라면 설치에
-> 실패해도 무방합니다 (해당 테스트 4개만 건너뜁니다).
+> `requirements.txt` 의 `torch` 와 `onnxruntime` 은 부스 앱이 쓰지 않습니다.
+> 9절의 RL 배포 스크립트용이므로, 부스만 돌릴 것이라면 설치에 실패해도
+> 무방합니다 (해당 테스트 4개만 건너뜁니다).
 
 ### 1) 실행 방법
 
