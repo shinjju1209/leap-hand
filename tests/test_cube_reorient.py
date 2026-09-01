@@ -210,6 +210,22 @@ class BoothReorientScreenTests(unittest.TestCase):
         app.step_smooth_control(0.02)
         app.hardware_controller.command_degrees.assert_called()
 
+    def test_entering_the_screen_disarms_the_hand(self) -> None:
+        """[4] reaches this screen straight from an armed teleop session.
+
+        Nothing here commands the hand, so an armed hand would sit holding
+        torque on its last pose while everyone watches the simulation.
+        """
+        app = self._app(enable_reorient=False)
+        app.hardware_controller = MagicMock()
+        app.current_screen = AppScreen.TELEOP
+        app.handle_action("toggle_arm")
+        self.assertTrue(app.armed)
+
+        app.handle_action("goto_reorient")
+        self.assertFalse(app.armed, "the hand stayed armed on the reorient screen")
+        app.hardware_controller.emergency_stop.assert_called()
+
     def test_the_booth_still_runs_without_a_policy(self) -> None:
         """A missing policy disables one screen, not the exhibition."""
         app = self._app(reorient_policy_path=Path("no/such/policy.npz"))

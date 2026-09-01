@@ -921,6 +921,10 @@ class BoothKioskApp:
             self.status_color = COLOR_SUCCESS
         elif action_id == "goto_reorient":
             self.current_screen = AppScreen.REORIENT
+            # Nothing on this screen commands the hand, so leaving it armed
+            # would hold torque on a hand nobody is watching -- [4] reaches
+            # here straight from an armed teleop session.
+            self.disarm_robot()
             if self.reorient_controller is None:
                 self.status_message = (
                     "Cube reorientation is unavailable -- see the console for why."
