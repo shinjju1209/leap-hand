@@ -49,19 +49,30 @@ DEFAULT_CALIB_PATH = Path("calibration/neutral_calibration.json")
 DEFAULT_MOTOR_CALIB_PATH = Path("calibration/hardware_motors.yaml")
 DEFAULT_MODEL_PATH = Path("models/hand_landmarker.task")
 
-# Colors in BGR format (Modern Dark Cyberpunk theme)
-COLOR_BG = (22, 18, 16)           # Deep charcoal navy
-COLOR_CARD_BG = (35, 28, 25)      # Slightly lighter card background
-COLOR_CARD_BORDER = (60, 50, 45)  # Card outline
-COLOR_TEXT_MAIN = (245, 245, 245) # Bright white
-COLOR_TEXT_MUTED = (160, 160, 160)# Slate gray
-COLOR_PRIMARY = (255, 180, 0)     # Neon Cyan / Sky Blue in BGR
-COLOR_SECONDARY = (0, 220, 255)   # Amber Gold in BGR
-COLOR_SUCCESS = (100, 230, 0)     # Emerald Green in BGR
-COLOR_DANGER = (50, 50, 245)      # Coral Red in BGR
-COLOR_WARNING = (0, 165, 255)     # Orange in BGR
-COLOR_ROBOT = (255, 100, 150)     # Purple/Magenta in BGR
-COLOR_HUMAN = (0, 200, 255)       # Yellow/Gold in BGR
+# Colours in BGR, taken from the SHAPE site (snu-shape.com): a light ground,
+# one blue that carries the brand, and a crimson for the things that need to
+# stand apart from it. Contrast is against the white card, measured, so the
+# muted greys stay readable rather than merely looking calm.
+COLOR_BG = (251, 248, 247)        # #f7f8fb  page ground
+COLOR_CARD_BG = (255, 255, 255)   # #ffffff  cards sit above the ground
+COLOR_CARD_BORDER = (234, 228, 224)  # #e0e4ea  hairline, not a frame
+COLOR_TEXT_MAIN = (26, 36, 52)    # #34241a  ink, 14.9:1
+COLOR_TEXT_MUTED = (127, 113, 105)   # #69717f  secondary, 4.9:1
+COLOR_PRIMARY = (243, 85, 40)     # #2855f3  brand blue, 5.7:1
+COLOR_SECONDARY = (70, 36, 182)   # #b62446  crimson, 6.3:1
+COLOR_SUCCESS = (75, 127, 26)     # #1a7f4b  green, 5.0:1
+COLOR_DANGER = (70, 36, 182)      # #b62446  the crimson again -- failure is
+                                  # the loudest thing on a light page
+COLOR_WARNING = (0, 106, 178)     # #b26a00  amber, 4.2:1 -- large text only
+COLOR_ROBOT = (124, 56, 20)       # #14387c  deep blue, the gradient's dark end
+COLOR_HUMAN = (70, 36, 182)       # #b62446  crimson, opposite the robot
+
+# Surfaces derived from the palette, so a screen never invents its own grey.
+COLOR_CARD_HOVER = (250, 245, 240)   # a card under the cursor
+COLOR_SUNKEN = (247, 242, 238)       # wells: viewports, inset panels
+COLOR_DISABLED_BG = (245, 243, 242)
+COLOR_DISABLED_TEXT = (188, 184, 180)
+COLOR_SHADOW = (52, 24, 12)          # #0c1834, the site's blue-cast shadow
 
 
 def get_hand_posture(name: str) -> np.ndarray:
@@ -168,6 +179,212 @@ class RpsState(Enum):
     RESULT = auto()
 
 
+# --- drawing primitives -------------------------------------------------------
+#
+# OpenCV draws squared-off rectangles and nothing else, so the rounded corners
+# and soft shadows the design leans on have to be built here. Every screen goes
+# through these rather than calling cv2.rectangle directly, which is also what
+# keeps the corner radius and the shadow the same everywhere.
+
+RADIUS_CARD = 12
+RADIUS_WELL = 10
+
+# Type scale. Thirteen different sizes had accumulated across the screens; five
+# is enough to say what a piece of text is, and a fixed set is what makes two
+# screens look like the same application.
+TYPE_DISPLAY = 1.5    # a single number the room should read
+TYPE_TITLE = 0.75     # screen and card titles
+TYPE_SUBTITLE = 0.6   # section labels
+TYPE_BODY = 0.5       # ordinary text
+TYPE_CAPTION = 0.42   # keys, units, footnotes
+
+
+def rounded_rect(
+    canvas: np.ndarray,
+    rect: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    radius: int = RADIUS_CARD,
+    thickness: int = -1,
+) -> None:
+    """A filled or stroked rectangle with rounded corners.
+
+    Composed from two overlapping rectangles and four corner arcs, which is the
+    only way to get one out of OpenCV. A radius past half the shorter side would
+    make the corners overlap, so it is clamped rather than left to fold in.
+    """
+    x, y, w, h = rect
+    radius = max(0, min(radius, w // 2, h // 2))
+    if radius == 0:
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), color, thickness, cv2.LINE_AA)
+        return
+
+    x2, y2 = x + w, y + h
+    centres = (
+        ((x + radius, y + radius), 180),
+        ((x2 - radius, y + radius), 270),
+        ((x2 - radius, y2 - radius), 0),
+        ((x + radius, y2 - radius), 90),
+    )
+    if thickness < 0:
+        cv2.rectangle(canvas, (x + radius, y), (x2 - radius, y2), color, -1)
+        cv2.rectangle(canvas, (x, y + radius), (x2, y2 - radius), color, -1)
+        for centre, start in centres:
+            cv2.ellipse(canvas, centre, (radius, radius), start, 0, 90, color, -1, cv2.LINE_AA)
+        return
+
+    cv2.line(canvas, (x + radius, y), (x2 - radius, y), color, thickness, cv2.LINE_AA)
+    cv2.line(canvas, (x + radius, y2), (x2 - radius, y2), color, thickness, cv2.LINE_AA)
+    cv2.line(canvas, (x, y + radius), (x, y2 - radius), color, thickness, cv2.LINE_AA)
+    cv2.line(canvas, (x2, y + radius), (x2, y2 - radius), color, thickness, cv2.LINE_AA)
+    for centre, start in centres:
+        cv2.ellipse(canvas, centre, (radius, radius), start, 0, 90, color, thickness, cv2.LINE_AA)
+
+
+def pill_rect(
+    canvas: np.ndarray,
+    rect: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    thickness: int = -1,
+) -> None:
+    """A fully rounded rectangle -- the site's 999px radius, for buttons."""
+    rounded_rect(canvas, rect, color, rect[3] // 2, thickness)
+
+
+def soft_shadow(
+    canvas: np.ndarray,
+    rect: tuple[int, int, int, int],
+    radius: int = RADIUS_CARD,
+    spread: int = 10,
+    strength: float = 0.10,
+) -> None:
+    """Lay a soft blue-cast shadow under a rectangle.
+
+    On a light ground a card needs somewhere to sit, and a hard border makes it
+    look boxed rather than raised. Concentric rounded rectangles at a low alpha
+    approximate a blur cheaply enough to run every frame; a real Gaussian over
+    the whole canvas costs far more than the few milliseconds a kiosk redraw
+    has to spare.
+    """
+    x, y, w, h = rect
+    layers = max(1, spread // 2)
+    for index in range(layers, 0, -1):
+        grow = index * 2
+        band = (x - grow, y - grow + 3, w + 2 * grow, h + 2 * grow)
+        if band[0] < 0 or band[1] < 0:
+            continue
+        if band[0] + band[2] > canvas.shape[1] or band[1] + band[3] > canvas.shape[0]:
+            continue
+        overlay = canvas.copy()
+        rounded_rect(overlay, band, COLOR_SHADOW, radius + grow, -1)
+        alpha = strength / layers
+        cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0.0, canvas)
+
+
+def card(
+    canvas: np.ndarray,
+    rect: tuple[int, int, int, int],
+    *,
+    title: str | None = None,
+    title_color: tuple[int, int, int] = COLOR_TEXT_MAIN,
+    fill: tuple[int, int, int] = COLOR_CARD_BG,
+    shadow: bool = True,
+) -> int:
+    """Draw a card, optionally with a title and its rule.
+
+    Returns the y a caller should start its own content at, so a card's body
+    does not have to know whether it was given a title.
+    """
+    x, y, w, h = rect
+    if shadow:
+        soft_shadow(canvas, rect)
+    rounded_rect(canvas, rect, fill, RADIUS_CARD, -1)
+    rounded_rect(canvas, rect, COLOR_CARD_BORDER, RADIUS_CARD, 1)
+    if title is None:
+        return y + 20
+    cv2.putText(canvas, title, (x + 20, y + 32), cv2.FONT_HERSHEY_DUPLEX,
+                TYPE_SUBTITLE, title_color, 1, cv2.LINE_AA)
+    cv2.line(canvas, (x + 20, y + 46), (x + w - 20, y + 46), COLOR_CARD_BORDER, 1, cv2.LINE_AA)
+    return y + 46
+
+
+def badge(
+    canvas: np.ndarray,
+    origin: tuple[int, int],
+    text: str,
+    color: tuple[int, int, int],
+    *,
+    filled: bool = False,
+    scale: float = TYPE_CAPTION,
+) -> int:
+    """A pill carrying one short label. Returns the width it used."""
+    (text_w, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+    x, y = origin
+    w, h = text_w + 26, 28
+    if filled:
+        pill_rect(canvas, (x, y, w, h), color, -1)
+        text_color = (255, 255, 255)
+    else:
+        pill_rect(canvas, (x, y, w, h), COLOR_CARD_BG, -1)
+        pill_rect(canvas, (x, y, w, h), color, 1)
+        text_color = color
+    cv2.putText(canvas, text, (x + 13, y + 19), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, text_color, 1, cv2.LINE_AA)
+    return w
+
+
+VIEWPORT = (40, 85, 800, 530)   # where a screen's main image goes
+
+
+def viewport(
+    canvas: np.ndarray,
+    rect: tuple[int, int, int, int] = VIEWPORT,
+    frame: np.ndarray | None = None,
+    placeholder: str = "No stream available",
+) -> None:
+    """A well holding a camera or simulation image, or saying it has none.
+
+    The image is written inside the rounded frame rather than over it, so the
+    corners stay rounded -- a straight blit would square them off again.
+    """
+    x, y, w, h = rect
+    soft_shadow(canvas, rect, RADIUS_CARD)
+    rounded_rect(canvas, rect, COLOR_SUNKEN, RADIUS_CARD, -1)
+
+    if frame is not None:
+        inner = (x + 5, y + 5, w - 10, h - 10)
+        resized = cv2.resize(frame, (inner[2], inner[3]))
+        mask = np.zeros((inner[3], inner[2]), np.uint8)
+        rounded_rect(mask, (0, 0, inner[2], inner[3]), 255, RADIUS_WELL, -1)
+        region = canvas[inner[1]:inner[1] + inner[3], inner[0]:inner[0] + inner[2]]
+        region[mask > 0] = resized[mask > 0]
+    else:
+        (text_w, _), _ = cv2.getTextSize(placeholder, cv2.FONT_HERSHEY_SIMPLEX,
+                                         TYPE_SUBTITLE, 1)
+        cv2.putText(canvas, placeholder, (x + (w - text_w) // 2, y + h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, TYPE_SUBTITLE, COLOR_TEXT_MUTED,
+                    1, cv2.LINE_AA)
+
+    rounded_rect(canvas, rect, COLOR_CARD_BORDER, RADIUS_CARD, 1)
+
+
+def overlay_label(
+    canvas: np.ndarray,
+    origin: tuple[int, int],
+    text: str,
+    color: tuple[int, int, int],
+) -> None:
+    """A label that has to stay readable over an unknown image beneath it."""
+    (text_w, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, 1)
+    x, y = origin
+    w, h = text_w + 30, 32
+    overlay = canvas.copy()
+    rounded_rect(overlay, (x, y, w, h), COLOR_CARD_BG, h // 2, -1)
+    cv2.addWeighted(overlay, 0.92, canvas, 0.08, 0.0, canvas)
+    rounded_rect(canvas, (x, y, w, h), COLOR_CARD_BORDER, h // 2, 1)
+    cv2.putText(canvas, text, (x + 15, y + 21), cv2.FONT_HERSHEY_SIMPLEX,
+                TYPE_BODY, color, 1, cv2.LINE_AA)
+
+
 @dataclass
 class Button:
     id: str
@@ -187,47 +404,87 @@ class Button:
         return x <= px <= x + w and y <= py <= y + h
 
     def draw(self, canvas: np.ndarray, mouse_pos: tuple[int, int]) -> None:
+        """Draw the button in whichever of its four states it is in.
+
+        The home screen's mode cards come through here too -- they are buttons
+        filling a whole card -- so the shape is chosen from the rectangle: a
+        tall one is a card, a short one is a pill.
+        """
         x, y, w, h = self.rect
         hovered = self.is_inside(*mouse_pos) and self.enabled
+        is_card = h > 120
 
-        fill_color = (
-            self.hover_color
-            if hovered
-            else (self.bg_color if not self.active else COLOR_PRIMARY)
-        )
+        radius = RADIUS_CARD if is_card else h // 2
+        accent = self.text_color if self.text_color != COLOR_TEXT_MAIN else COLOR_PRIMARY
+
         if not self.enabled:
-            fill_color = (25, 20, 20)
+            fill, border, label_color = COLOR_DISABLED_BG, COLOR_CARD_BORDER, COLOR_DISABLED_TEXT
+        elif self.active:
+            # The one state that inverts: an active toggle is the only thing on
+            # the screen carrying a solid brand colour, so it cannot be missed.
+            fill, border, label_color = accent, accent, (255, 255, 255)
+        elif hovered:
+            fill, border, label_color = COLOR_CARD_HOVER, accent, accent
+        else:
+            fill, border, label_color = COLOR_CARD_BG, COLOR_CARD_BORDER, self.text_color
 
-        # Rectangle background
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), fill_color, -1)
-        border_col = (
-            COLOR_PRIMARY
-            if (hovered or self.active)
-            else (self.border_color if self.enabled else (40, 35, 35))
-        )
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), border_col, 2)
+        if self.enabled and (hovered or self.active):
+            soft_shadow(canvas, self.rect, radius, spread=12, strength=0.13)
+        elif self.enabled:
+            soft_shadow(canvas, self.rect, radius, spread=6, strength=0.07)
 
-        # Text and shortcut
-        text = self.label
+        rounded_rect(canvas, self.rect, fill, radius, -1)
+        rounded_rect(canvas, self.rect, border, radius, 1)
+
+        # A mode card carries its own title and copy, written over it after the
+        # buttons are drawn; a label here would be a second heading on top of
+        # that one. So a card contributes its shape and its key cap only.
+        if not is_card:
+            (text_w, text_h), _ = cv2.getTextSize(
+                self.label, cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, 1
+            )
+            cap_room = 34 if self.shortcut else 0
+            text_x = x + max(14, (w - cap_room - text_w) // 2)
+            cv2.putText(canvas, self.label, (text_x, y + (h + text_h) // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, label_color, 1, cv2.LINE_AA)
+
         if self.shortcut:
-            text = f"[{self.shortcut}] {text}"
-        txt_col = self.text_color if self.enabled else (90, 85, 85)
-        if self.active:
-            txt_col = (10, 10, 10)
+            self._draw_shortcut(canvas, is_card, label_color, border)
 
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-        tx = x + max(10, (w - tw) // 2)
-        ty = y + (h + th) // 2
-        cv2.putText(
-            canvas,
-            text,
-            (tx, ty),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            txt_col,
-            2,
-            cv2.LINE_AA,
-        )
+    def _draw_shortcut(
+        self,
+        canvas: np.ndarray,
+        is_card: bool,
+        label_color: tuple[int, int, int],
+        border: tuple[int, int, int],
+    ) -> None:
+        """Set the shortcut as a key cap rather than "[K] " before the label.
+
+        Written into the caption it competed with the label for the same line
+        and pushed every label off centre; as a cap it reads as the key it is.
+        """
+        x, y, w, h = self.rect
+        key = self.shortcut
+        (key_w, _), _ = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, 1)
+        cap_w, cap_h = max(22, key_w + 14), 20
+
+        if is_card:
+            cap_x, cap_y = x + 22, y + 26
+        else:
+            cap_x, cap_y = x + w - cap_w - 14, y + (h - cap_h) // 2
+
+        if not self.enabled:
+            cap_bg, cap_fg = COLOR_DISABLED_BG, COLOR_DISABLED_TEXT
+        elif self.active:
+            cap_bg, cap_fg = (255, 255, 255), label_color
+        else:
+            cap_bg, cap_fg = COLOR_SUNKEN, COLOR_TEXT_MUTED
+
+        rounded_rect(canvas, (cap_x, cap_y, cap_w, cap_h), cap_bg, 6, -1)
+        if not self.active:
+            rounded_rect(canvas, (cap_x, cap_y, cap_w, cap_h), border, 6, 1)
+        cv2.putText(canvas, key, (cap_x + (cap_w - key_w) // 2, cap_y + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, cap_fg, 1, cv2.LINE_AA)
 
 
 @dataclass
@@ -367,11 +624,11 @@ class BoothKioskApp:
         another. Four cards is what makes this worth sharing -- the labels are
         short because at this width the longer ones no longer fit.
         """
-        card_w, card_h = 280, 380
+        card_w, card_h = 280, 292
         gap = 30
         columns = 4
         start_x = (self.width - (columns * card_w + (columns - 1) * gap)) // 2
-        return card_w, card_h, gap, start_x, 180
+        return card_w, card_h, gap, start_x, 210
 
     def _init_buttons(self) -> None:
         # HOME SCREEN BUTTONS
@@ -516,8 +773,12 @@ class BoothKioskApp:
         ]
 
         # SHOWCASE SCREEN BUTTONS (2-Column Grid + Dynamic Animations)
-        c1_x, c2_x = 815, 1035
-        bw, bh = 210, 42
+        # The column starts where every other screen's does. It began at 815,
+        # which put the first 25 pixels of every button over the viewport --
+        # invisible while both were flat, obvious once the buttons cast a shadow.
+        c1_x, c2_x = 880, 1070
+        bw, bh = 180, 42
+        wide_w = 370
         gap_y = 8
         sy = 90
 
@@ -597,7 +858,7 @@ class BoothKioskApp:
                 id="showcase_wave_hello",
                 label="Wave Hello (손 인사 애니메이션)",
                 shortcut="V",
-                rect=(c1_x, sy + 5 * (bh + gap_y) + 4, 430, bh),
+                rect=(c1_x, sy + 5 * (bh + gap_y) + 4, wide_w, bh),
                 bg_color=(30, 50, 35),
                 hover_color=(45, 75, 50),
                 text_color=COLOR_SUCCESS,
@@ -607,7 +868,7 @@ class BoothKioskApp:
                 id="back_home_showcase",
                 label="Return to Main Menu (메인 메뉴)",
                 shortcut="H",
-                rect=(c1_x, sy + 6 * (bh + gap_y) + 20, 430, 46),
+                rect=(c1_x, sy + 6 * (bh + gap_y) + 20, wide_w, 46),
                 bg_color=(40, 30, 25),
                 hover_color=(70, 50, 40),
             ),
@@ -1309,60 +1570,45 @@ class BoothKioskApp:
         return canvas
 
     def _draw_header(self, canvas: np.ndarray) -> None:
-        cv2.rectangle(canvas, (0, 0), (self.width, 65), (28, 22, 20), -1)
-        cv2.line(canvas, (0, 65), (self.width, 65), COLOR_CARD_BORDER, 2)
+        cv2.rectangle(canvas, (0, 0), (self.width, 65), COLOR_CARD_BG, -1)
+        cv2.line(canvas, (0, 65), (self.width, 65), COLOR_CARD_BORDER, 1, cv2.LINE_AA)
 
-        cv2.putText(
-            canvas,
-            "LEAP HAND INTERACTIVE BOOTH",
-            (25, 42),
-            cv2.FONT_HERSHEY_DUPLEX,
-            0.8,
-            COLOR_TEXT_MAIN,
-            2,
-            cv2.LINE_AA,
-        )
+        # A square of brand blue standing in for the mark, then the wordmark.
+        rounded_rect(canvas, (25, 20, 26, 26), COLOR_PRIMARY, 7, -1)
+        cv2.putText(canvas, "S", (33, 39), cv2.FONT_HERSHEY_DUPLEX, 0.6,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "LEAP HAND BOOTH", (62, 41), cv2.FONT_HERSHEY_DUPLEX,
+                    0.72, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
 
-        mode_str = f"MODE: {self.mode.upper()}"
-        cv2.rectangle(canvas, (480, 16), (620, 48), (45, 35, 30), -1)
-        cv2.putText(canvas, mode_str, (490, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_PRIMARY, 1, cv2.LINE_AA)
-
-        profile_str = f"PROFILE: {self.profile}"
-        cv2.rectangle(canvas, (630, 16), (790, 48), (45, 35, 30), -1)
-        cv2.putText(canvas, profile_str, (640, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_SECONDARY, 1, cv2.LINE_AA)
-
-        fps_str = f"FPS: {self.fps:.1f}"
-        cv2.rectangle(canvas, (800, 16), (900, 48), (45, 35, 30), -1)
-        cv2.putText(canvas, fps_str, (810, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        # Status pills, laid out left to right so none of them collide.
+        x = 330
+        x += badge(canvas, (x, 19), f"MODE  {self.mode.upper()}", COLOR_PRIMARY) + 10
+        x += badge(canvas, (x, 19), f"PROFILE  {self.profile}", COLOR_SECONDARY) + 10
+        badge(canvas, (x, 19), f"{self.fps:.0f} FPS", COLOR_TEXT_MUTED)
 
     def _draw_footer(self, canvas: np.ndarray) -> None:
         y = self.height - 45
-        cv2.rectangle(canvas, (0, y), (self.width, self.height), (25, 20, 18), -1)
-        cv2.line(canvas, (0, y), (self.width, y), COLOR_CARD_BORDER, 1)
+        cv2.rectangle(canvas, (0, y), (self.width, self.height), COLOR_CARD_BG, -1)
+        cv2.line(canvas, (0, y), (self.width, y), COLOR_CARD_BORDER, 1, cv2.LINE_AA)
 
-        cv2.circle(canvas, (25, y + 22), 6, self.status_color, -1)
-        cv2.putText(
-            canvas,
-            self.status_message,
-            (40, y + 28),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            COLOR_TEXT_MAIN,
-            1,
-            cv2.LINE_AA,
-        )
+        cv2.circle(canvas, (28, y + 23), 5, self.status_color, -1, cv2.LINE_AA)
+        cv2.putText(canvas, self.status_message, (44, y + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
+
+        hint = "H  Home        Q  Exit"
+        (hint_w, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, 1)
+        cv2.putText(canvas, hint, (self.width - hint_w - 28, y + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
     def _render_home_screen(self, canvas: np.ndarray) -> None:
-        cv2.putText(
-            canvas,
-            "Select an interactive mode below to begin:",
-            (self.width // 2 - 210, 130),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            COLOR_TEXT_MUTED,
-            2,
-            cv2.LINE_AA,
-        )
+        heading = "Choose a mode"
+        sub = "Physical AI, hands on."
+        (hw, _), _ = cv2.getTextSize(heading, cv2.FONT_HERSHEY_DUPLEX, 1.0, 1)
+        cv2.putText(canvas, heading, ((self.width - hw) // 2, 132),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.0, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
+        (sw, _), _ = cv2.getTextSize(sub, cv2.FONT_HERSHEY_SIMPLEX, TYPE_SUBTITLE, 1)
+        cv2.putText(canvas, sub, ((self.width - sw) // 2, 166),
+                    cv2.FONT_HERSHEY_SIMPLEX, TYPE_SUBTITLE, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
     def _render_home_card_text(self, canvas: np.ndarray) -> None:
         """Write each mode card's description over its button.
@@ -1410,15 +1656,27 @@ class BoothKioskApp:
             ),
         ]
 
-        # The button writes its label at the card's vertical centre, so the
-        # text is laid out around that rather than through it.
+        # The card is one column: an accent rule, the title, the blurb, then the
+        # bullets against the card's foot. The button underneath draws only the
+        # shape and the key cap, so every word on a card is written here.
         for index, (title, title_color, blurb, bullets) in enumerate(cards):
             cx = start_x + index * (card_w + gap)
-            cv2.putText(canvas, title, (cx + 22, y_pos + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, title_color, 2, cv2.LINE_AA)
+
+            rounded_rect(canvas, (cx + 22, y_pos + 66, 34, 3), title_color, 2, -1)
+            cv2.putText(canvas, title, (cx + 22, y_pos + 100), cv2.FONT_HERSHEY_DUPLEX,
+                        TYPE_SUBTITLE, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
+
             for line_index, line in enumerate(blurb):
-                cv2.putText(canvas, line, (cx + 22, y_pos + 110 + line_index * 28), cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
+                cv2.putText(canvas, line, (cx + 22, y_pos + 138 + line_index * 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+
+            cv2.line(canvas, (cx + 22, y_pos + 186), (cx + card_w - 22, y_pos + 186),
+                     COLOR_CARD_BORDER, 1, cv2.LINE_AA)
             for line_index, line in enumerate(bullets):
-                cv2.putText(canvas, line, (cx + 22, y_pos + 255 + line_index * 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+                row_y = y_pos + 214 + line_index * 26
+                cv2.circle(canvas, (cx + 26, row_y - 4), 2, title_color, -1, cv2.LINE_AA)
+                cv2.putText(canvas, line.lstrip("- "), (cx + 36, row_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
     def _render_teleop_screen(
         self,
@@ -1426,63 +1684,39 @@ class BoothKioskApp:
         camera_frame: np.ndarray | None,
         landmarks_list: list[Any],
     ) -> None:
-        vw, vh = 800, 530
-        vx, vy = 40, 85
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BG, -1)
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BORDER, 2)
-
+        vis_frame = None
         if camera_frame is not None:
             vis_frame = camera_frame.copy()
-            if landmarks_list:
-                for lm in landmarks_list:
-                    draw_hand(vis_frame, lm, [], True)
-            resized = cv2.resize(vis_frame, (vw - 8, vh - 8))
-            canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
-        else:
-            cv2.putText(
-                canvas,
-                "No Camera Stream Available",
-                (vx + 260, vy + 270),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                COLOR_TEXT_MUTED,
-                2,
-                cv2.LINE_AA,
-            )
+            for lm in landmarks_list:
+                draw_hand(vis_frame, lm, [], True)
+        viewport(canvas, VIEWPORT, vis_frame, "No camera stream")
 
-        arm_text = "ARMED (Tracking Active)" if self.armed else "DISARMED (Paused)"
-        arm_color = COLOR_SUCCESS if self.armed else COLOR_WARNING
-        cv2.rectangle(canvas, (vx + 20, vy + 20), (vx + 340, vy + 55), (20, 20, 20), -1)
-        cv2.putText(
-            canvas,
-            arm_text,
-            (vx + 30, vy + 44),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            arm_color,
-            2,
-            cv2.LINE_AA,
+        vx, vy, vw, vh = VIEWPORT
+        armed = self.armed
+        overlay_label(
+            canvas, (vx + 20, vy + 20),
+            "ARMED  ·  tracking" if armed else "DISARMED  ·  torque paused",
+            COLOR_SUCCESS if armed else COLOR_WARNING,
         )
 
         if self.calib_open_in_progress or self.calib_fist_in_progress:
             progress = self.calibrator.progress(time.perf_counter())
-            calib_title = (
-                "Capturing Open Neutral Pose..."
-                if self.calib_open_in_progress
-                else "Capturing Closed Fist Pose..."
-            )
+            title = ("Capturing open neutral pose"
+                     if self.calib_open_in_progress else "Capturing closed fist pose")
 
-            pw, ph = 460, 90
-            px = vx + (vw - pw) // 2
-            py = vy + vh - ph - 25
-            cv2.rectangle(canvas, (px, py), (px + pw, py + ph), (15, 15, 15), -1)
-            cv2.rectangle(canvas, (px, py), (px + pw, py + ph), COLOR_PRIMARY, 2)
-            cv2.putText(canvas, calib_title, (px + 20, py + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
+            pw, ph = 460, 96
+            px, py = vx + (vw - pw) // 2, vy + vh - ph - 24
+            card(canvas, (px, py, pw, ph))
+            cv2.putText(canvas, title, (px + 24, py + 32), cv2.FONT_HERSHEY_SIMPLEX,
+                        TYPE_BODY, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
 
-            bar_w = pw - 40
-            cv2.rectangle(canvas, (px + 20, py + 48), (px + 20 + bar_w, py + 72), (40, 40, 40), -1)
-            cv2.rectangle(canvas, (px + 20, py + 48), (px + 20 + int(bar_w * progress), py + 72), COLOR_SUCCESS, -1)
-            cv2.putText(canvas, f"{int(progress * 100)}%", (px + pw - 80, py + 66), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
+            bar_w = pw - 48
+            pill_rect(canvas, (px + 24, py + 48, bar_w, 12), COLOR_SUNKEN, -1)
+            filled = max(12, int(bar_w * progress))
+            pill_rect(canvas, (px + 24, py + 48, filled, 12), COLOR_PRIMARY, -1)
+            cv2.putText(canvas, f"{int(progress * 100)}%", (px + 24, py + 82),
+                        cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, COLOR_TEXT_MUTED,
+                        1, cv2.LINE_AA)
 
     def _render_rps_screen(
         self,
@@ -1490,107 +1724,99 @@ class BoothKioskApp:
         camera_frame: np.ndarray | None,
         landmarks_list: list[Any],
     ) -> None:
-        vw, vh = 460, 360
-        vx, vy = 40, 85
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BG, -1)
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BORDER, 2)
-
+        vis_frame = None
         if camera_frame is not None:
             vis_frame = camera_frame.copy()
-            if landmarks_list:
-                for lm in landmarks_list:
-                    draw_hand(vis_frame, lm, [], True)
-            resized = cv2.resize(vis_frame, (vw - 8, vh - 8))
-            canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
+            for lm in landmarks_list:
+                draw_hand(vis_frame, lm, [], True)
+        viewport(canvas, (40, 85, 460, 360), vis_frame, "No camera")
 
-        gw, gh = 460, 85
-        gx, gy = vx, vy + vh + 15
-        cv2.rectangle(canvas, (gx, gy), (gx + gw, gy + gh), COLOR_CARD_BG, -1)
-        cv2.rectangle(canvas, (gx, gy), (gx + gw, gy + gh), COLOR_CARD_BORDER, 2)
-        cv2.putText(canvas, "Player Gesture Detected:", (gx + 15, gy + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-
-        gesture_labels = {
-            "rock": "ROCK (Rock Move)",
-            "paper": "PAPER (Paper Move)",
-            "scissors": "SCISSORS (Scissors Move)",
-            None: "Show hand to camera...",
-        }
-        g_label = gesture_labels.get(self.human_detected_move, "Detecting...")
-        g_col = COLOR_HUMAN if self.human_detected_move else COLOR_TEXT_MUTED
-        cv2.putText(canvas, g_label, (gx + 20, gy + 62), cv2.FONT_HERSHEY_SIMPLEX, 0.8, g_col, 2, cv2.LINE_AA)
+        # What the camera currently believes the visitor is showing.
+        gx, gy, gw, gh = 40, 460, 460, 85
+        card(canvas, (gx, gy, gw, gh))
+        cv2.putText(canvas, "PLAYER GESTURE", (gx + 20, gy + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+        detected = self.human_detected_move
+        cv2.putText(canvas, detected.upper() if detected else "Show your hand to the camera",
+                    (gx + 20, gy + 64), cv2.FONT_HERSHEY_DUPLEX,
+                    TYPE_TITLE if detected else TYPE_SUBTITLE,
+                    COLOR_HUMAN if detected else COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
         ax, ay, aw, ah = 520, 85, 340, 460
-        cv2.rectangle(canvas, (ax, ay), (ax + aw, ay + ah), COLOR_CARD_BG, -1)
-        cv2.rectangle(canvas, (ax, ay), (ax + aw, ay + ah), COLOR_CARD_BORDER, 2)
-
-        cv2.putText(canvas, "BATTLE ARENA", (ax + 85, ay + 38), cv2.FONT_HERSHEY_DUPLEX, 0.7, COLOR_PRIMARY, 2, cv2.LINE_AA)
-        cv2.line(canvas, (ax + 20, ay + 50), (ax + aw - 20, ay + 50), COLOR_CARD_BORDER, 1)
+        card(canvas, (ax, ay, aw, ah), title="BATTLE ARENA", title_color=COLOR_PRIMARY)
 
         now = time.monotonic()
         if self.rps_state == RpsState.IDLE:
-            cv2.putText(canvas, "READY TO PLAY!", (ax + 85, ay + 150), cv2.FONT_HERSHEY_SIMPLEX, 0.75, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
-            cv2.putText(canvas, "Press [Space] key or", (ax + 75, ay + 210), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-            cv2.putText(canvas, "click [START] button", (ax + 70, ay + 245), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_PRIMARY, 2, cv2.LINE_AA)
+            cv2.putText(canvas, "Ready to play", (ax + 24, ay + 160),
+                        cv2.FONT_HERSHEY_DUPLEX, TYPE_TITLE, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
+            cv2.putText(canvas, "Press Space, or click", (ax + 24, ay + 200),
+                        cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+            cv2.putText(canvas, "START RPS MATCH.", (ax + 24, ay + 226),
+                        cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
         elif self.rps_state == RpsState.COUNTDOWN:
             elapsed = now - self.countdown_start_time
             count_val = max(1, 3 - int(elapsed))
-            cx, cy = ax + aw // 2, ay + 210
-            radius = 60 + int(math.sin(elapsed * 10.0) * 8.0)
-            cv2.circle(canvas, (cx, cy), radius, COLOR_SECONDARY, 4)
-            cv2.putText(canvas, str(count_val), (cx - 20, cy + 22), cv2.FONT_HERSHEY_DUPLEX, 2.2, COLOR_TEXT_MAIN, 4, cv2.LINE_AA)
-            cv2.putText(canvas, "Rock... Paper... Scissors...", (ax + 40, ay + 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_SECONDARY, 2, cv2.LINE_AA)
+            cx, cy = ax + aw // 2, ay + 220
+            # The ring breathes so the countdown reads across a busy room.
+            radius = 62 + int(math.sin(elapsed * 10.0) * 6.0)
+            cv2.circle(canvas, (cx, cy), radius, COLOR_SUNKEN, -1, cv2.LINE_AA)
+            cv2.circle(canvas, (cx, cy), radius, COLOR_PRIMARY, 3, cv2.LINE_AA)
+            (nw, nh), _ = cv2.getTextSize(str(count_val), cv2.FONT_HERSHEY_DUPLEX, 2.2, 2)
+            cv2.putText(canvas, str(count_val), (cx - nw // 2, cy + nh // 2),
+                        cv2.FONT_HERSHEY_DUPLEX, 2.2, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
+            cv2.putText(canvas, "Rock... Paper... Scissors...", (ax + 40, ay + 380),
+                        cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, COLOR_PRIMARY, 1, cv2.LINE_AA)
 
         elif self.rps_state in (RpsState.SHOOT, RpsState.RESULT):
-            cv2.putText(canvas, "ROBOT HAND:", (ax + 25, ay + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_ROBOT, 2, cv2.LINE_AA)
-            r_move_text = f"[{self.robot_chosen_move.upper()}]" if self.robot_chosen_move else "..."
-            cv2.putText(canvas, r_move_text, (ax + 55, ay + 145), cv2.FONT_HERSHEY_DUPLEX, 1.1, COLOR_ROBOT, 3, cv2.LINE_AA)
-
-            cv2.putText(canvas, "YOU (PLAYER):", (ax + 25, ay + 215), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_HUMAN, 2, cv2.LINE_AA)
-            h_move_text = f"[{self.human_detected_move.upper()}]" if self.human_detected_move else "NO HAND"
-            cv2.putText(canvas, h_move_text, (ax + 55, ay + 265), cv2.FONT_HERSHEY_DUPLEX, 1.1, COLOR_HUMAN, 3, cv2.LINE_AA)
+            for label, move, color, row in (
+                ("ROBOT", self.robot_chosen_move, COLOR_ROBOT, 0),
+                ("YOU", self.human_detected_move, COLOR_HUMAN, 1),
+            ):
+                row_y = ay + 90 + row * 110
+                cv2.putText(canvas, label, (ax + 24, row_y), cv2.FONT_HERSHEY_SIMPLEX,
+                            TYPE_CAPTION, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+                cv2.putText(canvas, move.upper() if move else "NO HAND",
+                            (ax + 24, row_y + 44), cv2.FONT_HERSHEY_DUPLEX,
+                            1.1, color if move else COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
             if self.last_round_verdict:
-                v_text = ""
-                v_color = COLOR_TEXT_MAIN
-                if self.last_round_verdict == "win":
-                    v_text = "YOU WIN!"
-                    v_color = COLOR_SUCCESS
-                elif self.last_round_verdict == "loss":
-                    v_text = "ROBOT WINS!"
-                    v_color = COLOR_DANGER
-                elif self.last_round_verdict == "tie":
-                    v_text = "DRAW (TIE)!"
-                    v_color = COLOR_WARNING
-                else:
-                    v_text = "No Hand Detected"
-                    v_color = COLOR_TEXT_MUTED
+                verdicts = {
+                    "win": ("YOU WIN", COLOR_SUCCESS),
+                    "loss": ("ROBOT WINS", COLOR_SECONDARY),
+                    "tie": ("DRAW", COLOR_WARNING),
+                }
+                text, color = verdicts.get(
+                    self.last_round_verdict, ("No hand detected", COLOR_TEXT_MUTED)
+                )
+                vx, vy, vw2, vh2 = ax + 16, ay + 330, aw - 32, 86
+                card(canvas, (vx, vy, vw2, vh2), fill=COLOR_SUNKEN, shadow=False)
+                rounded_rect(canvas, (vx, vy, vw2, vh2), color, RADIUS_CARD, 2)
+                (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, TYPE_TITLE, 1)
+                cv2.putText(canvas, text, (vx + (vw2 - tw) // 2, vy + (vh2 + th) // 2),
+                            cv2.FONT_HERSHEY_DUPLEX, TYPE_TITLE, color, 1, cv2.LINE_AA)
 
-                cv2.rectangle(canvas, (ax + 15, ay + 330), (ax + aw - 15, ay + 410), (20, 20, 20), -1)
-                cv2.rectangle(canvas, (ax + 15, ay + 330), (ax + aw - 15, ay + 410), v_color, 2)
-                (vtw, _), _ = cv2.getTextSize(v_text, cv2.FONT_HERSHEY_DUPLEX, 0.75, 2)
-                cv2.putText(canvas, v_text, (ax + (aw - vtw) // 2, ay + 378), cv2.FONT_HERSHEY_DUPLEX, 0.75, v_color, 2, cv2.LINE_AA)
-
-        sx, sy, sw, sh = 880, 390, 370, 200
-        cv2.rectangle(canvas, (sx, sy), (sx + sw, sy + sh), COLOR_CARD_BG, -1)
-        cv2.rectangle(canvas, (sx, sy), (sx + sw, sy + sh), COLOR_CARD_BORDER, 2)
-        cv2.putText(canvas, "SCOREBOARD", (sx + 20, sy + 32), cv2.FONT_HERSHEY_DUPLEX, 0.65, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
-        cv2.line(canvas, (sx + 20, sy + 44), (sx + sw - 20, sy + 44), COLOR_CARD_BORDER, 1)
+        # Below the buttons, which end at y=394. It used to start at 390 and the
+        # two drew over each other; the shadows made the collision obvious.
+        sx, sy, sw, sh = 880, 412, 370, 178
+        card(canvas, (sx, sy, sw, sh), title="SCOREBOARD")
 
         sb = self.rps_scoreboard
         win_rate = (sb.human_wins / max(1, sb.total_rounds)) * 100.0
-        cv2.putText(canvas, f"Total Rounds: {sb.total_rounds}", (sx + 25, sy + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        cv2.putText(canvas, f"Player Wins:  {sb.human_wins} Wins", (sx + 25, sy + 105), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_SUCCESS, 2, cv2.LINE_AA)
-        cv2.putText(canvas, f"Robot Wins:   {sb.robot_wins} Wins", (sx + 25, sy + 135), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_DANGER, 2, cv2.LINE_AA)
-        cv2.putText(canvas, f"Ties / Draws: {sb.ties}  |  Win Rate: {win_rate:.1f}%", (sx + 25, sy + 170), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_WARNING, 1, cv2.LINE_AA)
+        rows = (
+            ("Rounds", str(sb.total_rounds), COLOR_TEXT_MAIN),
+            ("Player wins", str(sb.human_wins), COLOR_SUCCESS),
+            ("Robot wins", str(sb.robot_wins), COLOR_SECONDARY),
+            ("Draws", f"{sb.ties}   ·   {win_rate:.0f}% win rate", COLOR_TEXT_MUTED),
+        )
+        for index, (name, value, color) in enumerate(rows):
+            row_y = sy + 78 + index * 27
+            cv2.putText(canvas, name, (sx + 20, row_y), cv2.FONT_HERSHEY_SIMPLEX,
+                        TYPE_BODY, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+            cv2.putText(canvas, value, (sx + 170, row_y), cv2.FONT_HERSHEY_SIMPLEX,
+                        TYPE_BODY, color, 1, cv2.LINE_AA)
 
     def _render_showcase_screen(self, canvas: np.ndarray, camera_frame: np.ndarray | None) -> None:
-        vw, vh = 800, 530
-        vx, vy = 40, 85
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BG, -1)
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BORDER, 2)
-
-        # In Showcase mode, render MuJoCo 3D digital twin hand directly into the viewport
         sim_frame = None
         if self.mujoco_controller is not None:
             try:
@@ -1598,46 +1824,17 @@ class BoothKioskApp:
             except Exception:
                 sim_frame = None
 
-        display_frame = sim_frame if sim_frame is not None else camera_frame
+        frame = sim_frame if sim_frame is not None else camera_frame
+        viewport(canvas, VIEWPORT, frame, "No 3D simulation stream")
 
-        if display_frame is not None:
-            resized = cv2.resize(display_frame, (vw - 8, vh - 8))
-            canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
-        else:
-            cv2.putText(
-                canvas,
-                "No 3D Simulation Stream Available",
-                (vx + 180, vy + 270),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                COLOR_TEXT_MUTED,
-                2,
-                cv2.LINE_AA,
-            )
-
-        badge_text = (
-            "3D Robot Simulation (Digital Twin)"
-            if sim_frame is not None
-            else "Camera View"
-        )
-        cv2.rectangle(canvas, (vx + 20, vy + 20), (vx + 380, vy + 55), (20, 20, 20), -1)
-        cv2.putText(
-            canvas,
-            badge_text,
-            (vx + 30, vy + 44),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+        vx, vy, _, _ = VIEWPORT
+        overlay_label(
+            canvas, (vx + 20, vy + 20),
+            "3D digital twin" if sim_frame is not None else "Camera view",
             COLOR_PRIMARY if sim_frame is not None else COLOR_SUCCESS,
-            2,
-            cv2.LINE_AA,
         )
 
     def _render_reorient_screen(self, canvas: np.ndarray) -> None:
-        vw, vh = 800, 530
-        vx, vy = 40, 85
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BG, -1)
-        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BORDER, 2)
-
         controller = self.reorient_controller
         sim_frame = None
         if controller is not None:
@@ -1646,66 +1843,65 @@ class BoothKioskApp:
             except Exception:
                 sim_frame = None
 
-        if sim_frame is not None:
-            resized = cv2.resize(sim_frame, (vw - 8, vh - 8))
-            canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
-        else:
-            cv2.putText(
-                canvas,
-                "Cube Reorientation Unavailable",
-                (vx + 200, vy + 270),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                COLOR_TEXT_MUTED,
-                2,
-                cv2.LINE_AA,
-            )
+        viewport(canvas, VIEWPORT, sim_frame, "Cube reorientation unavailable")
+        if controller is None or sim_frame is None:
             return
 
-        # The scene shows the goal cube on the left and the hand's cube on the
-        # right, so say which is which -- it is the whole point of the demo.
-        cv2.rectangle(canvas, (vx + 20, vy + 20), (vx + 250, vy + 55), (20, 20, 20), -1)
-        cv2.putText(canvas, "GOAL (target pose)", (vx + 32, vy + 44), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_ROBOT, 2, cv2.LINE_AA)
-        cv2.rectangle(canvas, (vx + vw - 260, vy + 20), (vx + vw - 20, vy + 55), (20, 20, 20), -1)
-        cv2.putText(canvas, "HAND (policy at work)", (vx + vw - 248, vy + 44), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_PRIMARY, 2, cv2.LINE_AA)
+        vx, vy, vw, vh = VIEWPORT
+        # The scene puts the goal on the left and the hand's cube on the right,
+        # which is the demo's whole story: make one match the other.
+        overlay_label(canvas, (vx + 20, vy + 20), "GOAL", COLOR_SECONDARY)
+        (hand_w, _), _ = cv2.getTextSize("HAND", cv2.FONT_HERSHEY_SIMPLEX, TYPE_BODY, 1)
+        overlay_label(canvas, (vx + vw - hand_w - 50, vy + 20), "HAND", COLOR_PRIMARY)
 
         error_degrees = controller.goal_error_degrees
         # Training counts a reorientation as solved at 0.1 rad, about 5.7 deg.
         solved = error_degrees <= 5.73
         error_color = COLOR_SUCCESS if solved else (
-            COLOR_WARNING if error_degrees < 45.0 else COLOR_DANGER
+            COLOR_PRIMARY if error_degrees < 45.0 else COLOR_SECONDARY
         )
 
-        panel_w, panel_h = 300, 96
-        px = vx + (vw - panel_w) // 2
-        py = vy + vh - panel_h - 20
-        cv2.rectangle(canvas, (px, py), (px + panel_w, py + panel_h), (15, 15, 15), -1)
-        cv2.rectangle(canvas, (px, py), (px + panel_w, py + panel_h), error_color, 2)
-        cv2.putText(canvas, "ORIENTATION ERROR", (px + 55, py + 26), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-        cv2.putText(canvas, f"{error_degrees:5.1f}", (px + 60, py + 78), cv2.FONT_HERSHEY_DUPLEX, 1.5, error_color, 2, cv2.LINE_AA)
-        cv2.putText(canvas, "deg", (px + 205, py + 78), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXT_MUTED, 2, cv2.LINE_AA)
+        pw, ph = 320, 104
+        px, py = vx + (vw - pw) // 2, vy + vh - ph - 22
+        card(canvas, (px, py, pw, ph))
+        pill_rect(canvas, (px, py + 14, 4, ph - 28), error_color, -1)
+        cv2.putText(canvas, "ORIENTATION ERROR", (px + 24, py + 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, TYPE_CAPTION, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{error_degrees:.1f}", (px + 24, py + 84),
+                    cv2.FONT_HERSHEY_DUPLEX, TYPE_DISPLAY, error_color, 1, cv2.LINE_AA)
+        (num_w, _), _ = cv2.getTextSize(f"{error_degrees:.1f}", cv2.FONT_HERSHEY_DUPLEX,
+                                        TYPE_DISPLAY, 1)
+        cv2.putText(canvas, "deg", (px + 34 + num_w, py + 84), cv2.FONT_HERSHEY_SIMPLEX,
+                    TYPE_SUBTITLE, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
+        state = None
         if controller.paused:
-            cv2.putText(canvas, "PAUSED", (vx + vw // 2 - 70, vy + 100), cv2.FONT_HERSHEY_DUPLEX, 1.1, COLOR_WARNING, 2, cv2.LINE_AA)
+            state, state_color = "PAUSED", COLOR_WARNING
         elif solved:
-            cv2.putText(canvas, "SOLVED", (vx + vw // 2 - 70, vy + 100), cv2.FONT_HERSHEY_DUPLEX, 1.1, COLOR_SUCCESS, 2, cv2.LINE_AA)
+            state, state_color = "SOLVED", COLOR_SUCCESS
+        if state is not None:
+            (state_w, _), _ = cv2.getTextSize(state, cv2.FONT_HERSHEY_SIMPLEX,
+                                              TYPE_BODY, 1)
+            overlay_label(canvas, (vx + (vw - state_w - 30) // 2, vy + 20),
+                          state, state_color)
 
-        # Telemetry goes in the strip between the last button and the footer.
-        # The buttons are drawn after this method returns, so anything placed
-        # over the button column is painted out.
-        tx, ty, strip_w = 880, 638, 370
+        # Telemetry between the last button and the footer, where the buttons
+        # -- drawn after this method -- cannot paint over it.
+        tx, ty, strip_w = 880, 634, 370
         cells = [
             ("RATE", f"{1.0 / controller.dt:.0f} Hz"),
             ("SOLVED", str(controller.successes)),
             ("DROPS", str(controller.drops)),
         ]
         if controller.tilt_degrees:
-            cells.append(("TILT", f"{controller.tilt_degrees:.0f} deg"))
+            cells.append(("TILT", f"{controller.tilt_degrees:.0f}"))
         cell_w = strip_w // len(cells)
         for index, (name, value) in enumerate(cells):
             cx = tx + index * cell_w
-            cv2.putText(canvas, name, (cx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-            cv2.putText(canvas, value, (cx, ty + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
+            cv2.putText(canvas, name, (cx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                        TYPE_CAPTION, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+            cv2.putText(canvas, value, (cx, ty + 26), cv2.FONT_HERSHEY_DUPLEX,
+                        TYPE_SUBTITLE, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
 
     def run(self) -> int:
         """Main application loop."""
