@@ -125,7 +125,8 @@ python booth_app.py --reorient-tilt-deg 20
 (콘솔에 이유가 출력됩니다).
 
 1. **정책 파일** — `models/cube_reorient_policy.npz`
-2. **MuJoCo Playground 체크아웃** — 재배향 장면 XML과 메시를 여기서 읽습니다.
+2. **MuJoCo 장면** — `assets/reorient_scene/` 에 함께 커밋되어 있습니다 (8 MB).
+   따로 받을 것이 없고, 없을 때만 MuJoCo Playground 체크아웃을 찾습니다.
 
 `mujoco_playground`를 **임포트하지는 않습니다.** 장면 XML을 문자열로 읽고 에셋을
 파일 이름 기준으로 직접 모아 넘기기 때문에, jax·ml_collections 없이도 학습과

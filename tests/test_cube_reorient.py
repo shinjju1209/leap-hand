@@ -139,6 +139,44 @@ class CubeReorientControllerTests(unittest.TestCase):
             )
 
 
+class BundledSceneTests(unittest.TestCase):
+    """The scene ships with the repo, so a clone is enough to run the demo."""
+
+    def test_the_scene_and_its_assets_are_in_the_repo(self) -> None:
+        from cube_reorient.sim_backend import BUNDLED_SCENE_DIR
+
+        self.assertTrue((BUNDLED_SCENE_DIR / "scene_mjx_cube.xml").is_file(),
+                        f"the scene is missing from {BUNDLED_SCENE_DIR}")
+        assets = list(BUNDLED_SCENE_DIR.iterdir())
+        self.assertGreater(len(assets), 20, "the meshes and textures are missing")
+
+    def test_it_loads_with_no_playground_checkout_anywhere(self) -> None:
+        """The point of bundling: another machine needs only this repo."""
+        from cube_reorient import sim_backend
+
+        original = sim_backend.DEFAULT_PLAYGROUND_ROOT
+        sim_backend.DEFAULT_PLAYGROUND_ROOT = Path("/nonexistent/nowhere")
+        try:
+            backend = sim_backend.MujocoSimBackend()
+            self.assertEqual(backend.model.nu, 16)
+        finally:
+            sim_backend.DEFAULT_PLAYGROUND_ROOT = original
+
+    def test_the_bundled_model_is_the_one_the_policy_was_trained_against(self) -> None:
+        """Bundling the wrong meshes would be silent: it would just behave badly.
+
+        These are the numbers that separate the training scene from the
+        digital twin -- 16 actuators at kp 3.0, and a 108 g cube.
+        """
+        from cube_reorient import MujocoSimBackend
+
+        model = MujocoSimBackend().model
+        self.assertEqual(model.nu, 16)
+        self.assertAlmostEqual(float(model.actuator_gainprm[:, 0].max()), 3.0, places=3)
+        cube = model.body(model.body("cube").id)
+        self.assertAlmostEqual(float(cube.mass[0]), 0.108, places=3)
+
+
 class BoothReorientScreenTests(unittest.TestCase):
     """The booth half: buttons, keys, and staying away from the hand."""
 

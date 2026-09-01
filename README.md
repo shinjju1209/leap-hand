@@ -343,6 +343,43 @@ python rl_sim2real_deploy.py --mode both --port /dev/ttyUSB0
 
 관람객 체험 및 전시회 시연을 위한 원터치 터치스크린/키보드 지원 종합 키오스크 애플리케이션입니다.
 
+### 0) 다른 장비에 설치하기
+
+부스에 필요한 것은 이 저장소가 전부 들고 있습니다. MediaPipe 손 모델,
+재배향 정책, MuJoCo 장면과 메시까지 커밋되어 있으므로 clone 후 의존성만
+설치하면 됩니다. LFS 도 쓰지 않습니다.
+
+```bash
+git clone https://github.com/shinjju1209/leap-hand
+cd leap-hand
+git checkout feat/booth-shape-ui
+
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# 하드웨어 없이 확인
+python booth_app.py --mode mujoco --no-hardware
+```
+
+실물 손을 붙이려면 시리얼 포트에 접근 권한이 있어야 합니다.
+
+```bash
+sudo usermod -aG dialout $USER      # 로그아웃 후 다시 로그인
+python booth_app.py --mode hardware --port /dev/ttyUSB0
+```
+
+설치가 제대로 됐는지는 테스트로 확인할 수 있습니다. 하드웨어도 카메라도
+필요 없습니다.
+
+```bash
+python -m unittest tests.test_booth_theme tests.test_cube_reorient tests.test_booth_app
+```
+
+> `torch` 와 `onnxruntime` 은 `requirements.txt` 에 있지만 부스 앱은 쓰지
+> 않습니다. 별도의 RL 배포 스크립트용이라, 부스만 돌릴 것이라면 설치에
+> 실패해도 무방합니다 (해당 테스트 4개만 건너뜁니다).
+
 ### 1) 실행 방법
 
 ```bash
@@ -413,10 +450,10 @@ python booth_app.py --mode hardware --port /dev/ttyUSB0 --no-shadows
 나머지 세 모드는 그대로 동작합니다 (콘솔에 이유가 출력됩니다).
 
 - **정책 파일**: `models/cube_reorient_policy.npz` (`--reorient-policy` 로 변경)
-- **MuJoCo Playground 체크아웃**: 재배향 장면 XML과 메시를 여기서 읽습니다.
-  설치된 패키지가 있으면 그것을, 없으면 `~/Projects/mujoco_playground` 를 봅니다
-  (`--playground-root` 로 변경). `mujoco_playground` 를 임포트하지는 않으므로
-  jax·ml_collections 는 필요 없습니다.
+- **MuJoCo 장면**: `assets/reorient_scene/` 에 함께 들어 있어 별도 설치가
+  필요 없습니다. 없을 때만 MuJoCo Playground 체크아웃을 찾습니다
+  (`--playground-root`). `mujoco_playground` 를 임포트하지는 않으므로
+  jax·ml_collections 는 어느 쪽이든 필요 없습니다.
 
 ```bash
 # 기본 실행 (부스 전체)

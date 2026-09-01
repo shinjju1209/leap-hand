@@ -18,6 +18,24 @@ DEFAULT_DROP_HEIGHT = -0.05  # matches reorient.py: fall when cube_position[2] <
 
 DEFAULT_PLAYGROUND_ROOT = Path.home() / "Projects" / "mujoco_playground"
 
+# The scene and the meshes it needs, copied into this repo so the booth runs
+# from a clone alone. It is 8 MB: the Playground checkout's own leap_hand
+# assets minus the left-hand meshes, which this scene never references.
+BUNDLED_SCENE_DIR = Path(__file__).resolve().parent.parent / "assets" / "reorient_scene"
+
+
+def _bundled_assets() -> tuple[Path, dict[str, bytes]] | None:
+    """The scene XML and its assets from this repo, if they were shipped."""
+    scene = BUNDLED_SCENE_DIR / "scene_mjx_cube.xml"
+    if not scene.is_file():
+        return None
+    assets = {
+        path.name: path.read_bytes()
+        for path in BUNDLED_SCENE_DIR.iterdir()
+        if path.is_file()
+    }
+    return scene, assets
+
 
 def _playground_package_dir(playground_root: str | Path | None = None) -> Path:
     """Locate the mujoco_playground package, by import or else on disk.
@@ -108,25 +126,26 @@ class MujocoSimBackend:
                 "mujoco is required to construct MujocoSimBackend"
             ) from exc
 
-        package_dir = _playground_package_dir(playground_root)
-        path = (
-            _default_model_path(playground_root)
-            if model_path is None
-            else Path(model_path)
-        )
-        if not path.is_file():
-            raise FileNotFoundError(f"MuJoCo model does not exist: {path}")
+        bundled = _bundled_assets() if model_path is None else None
+        if bundled is not None:
+            path, assets = bundled
+        else:
+            path = (
+                _default_model_path(playground_root)
+                if model_path is None
+                else Path(model_path)
+            )
+            if not path.is_file():
+                raise FileNotFoundError(f"MuJoCo model does not exist: {path}")
+            assets = _collect_assets(_playground_package_dir(playground_root))
 
         self._mujoco: Any = mujoco
-        # The scene XML reaches the menagerie meshes through a relative path
-        # that assumes a layout the checkout does not have, so from_xml_path
-        # cannot resolve them.  Playground loads the model from a string with an
-        # explicit asset dict keyed by basename; _collect_assets builds the same
-        # dict off the filesystem, so the model here is the trained one without
-        # importing jax to get it.
-        self._model = mujoco.MjModel.from_xml_string(
-            path.read_text(), assets=_collect_assets(package_dir)
-        )
+        # The scene XML reaches its meshes through relative paths that assume a
+        # layout neither checkout has, so from_xml_path cannot resolve them.
+        # Playground loads the model from a string with an explicit asset dict
+        # keyed by basename; both routes above build the same dict, so the model
+        # is the trained one without importing jax to get it.
+        self._model = mujoco.MjModel.from_xml_string(path.read_text(), assets=assets)
         self._model.opt.timestep = float(sim_dt)
         self._data = mujoco.MjData(self._model)
         self._dt = float(ctrl_dt)
