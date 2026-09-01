@@ -253,6 +253,26 @@ def pill_rect(
     rounded_rect(canvas, rect, color, rect[3] // 2, thickness)
 
 
+@lru_cache(maxsize=32)
+def _shadow_on_ground(
+    width: int, height: int, radius: int, spread: int, strength: float,
+    ground: tuple[int, int, int],
+) -> np.ndarray:
+    """The finished pixels of a shadow cast onto a known flat colour.
+
+    Most shadows in the booth fall on the page and nothing else -- the viewport
+    is the same rectangle in the same place on every screen, over the same
+    ground, every frame. Compositing it once and blitting the result turns the
+    largest of them, 800x530, from about 3.5 ms a frame into a memory copy.
+    """
+    mask = _shadow_mask(width, height, radius, spread, strength)
+    base = np.empty((mask.shape[0], mask.shape[1], 3), np.float32)
+    base[:] = ground
+    return (base * (1.0 - mask) + np.asarray(COLOR_SHADOW, np.float32) * mask).astype(
+        np.uint8
+    )
+
+
 @lru_cache(maxsize=64)
 def _shadow_mask(
     width: int, height: int, radius: int, spread: int, strength: float
@@ -281,8 +301,12 @@ def soft_shadow(
     radius: int = RADIUS_CARD,
     spread: int = 10,
     strength: float = 0.10,
+    ground: tuple[int, int, int] | None = None,
 ) -> None:
     """Lay a soft blue-cast shadow under a rectangle.
+
+    Pass ``ground`` when the shadow falls on a known flat colour and nothing
+    else; the composited result is then cached rather than recomputed.
 
     On a light ground a card needs somewhere to sit, and a hard border makes it
     look boxed rather than raised.
@@ -293,7 +317,7 @@ def soft_shadow(
     stuttered; the region is a few hundred pixels across.
     """
     x, y, w, h = rect
-    if w <= 0 or h <= 0:
+    if w <= 0 or h <= 0 or not SHADOWS_ENABLED:
         return
     pad = max(2, spread)
     mask = _shadow_mask(w, h, radius, spread, strength)
@@ -306,6 +330,13 @@ def soft_shadow(
     y1 = min(canvas_h, top + mask.shape[0])
     x1 = min(canvas_w, left + mask.shape[1])
     if y0 >= y1 or x0 >= x1:
+        return
+
+    if ground is not None:
+        # Nothing under it but the page, so the answer is already known.
+        ready = _shadow_on_ground(w, h, radius, spread, strength, ground)
+        np.copyto(canvas[y0:y1, x0:x1],
+                  ready[y0 - top:y1 - top, x0 - left:x1 - left])
         return
 
     window = mask[y0 - top:y1 - top, x0 - left:x1 - left]
@@ -403,6 +434,16 @@ def draw_logo(canvas: np.ndarray, logo: np.ndarray, origin: tuple[int, int]) -> 
 
 CAMERA_SCAN_LIMIT = 6
 
+# Shadows are the most expensive thing the theme asks for. On a machine that
+# cannot spare them, this turns them off and leaves the hairlines behind, which
+# is a flatter page rather than a broken one.
+SHADOWS_ENABLED = True
+
+
+def set_shadows_enabled(enabled: bool) -> None:
+    global SHADOWS_ENABLED
+    SHADOWS_ENABLED = enabled
+
 
 def open_camera(preferred: int, scan_limit: int = CAMERA_SCAN_LIMIT):
     """Open the first camera that actually delivers a frame.
@@ -463,7 +504,7 @@ def viewport(
     corners stay rounded -- a straight blit would square them off again.
     """
     x, y, w, h = rect
-    soft_shadow(canvas, rect, RADIUS_CARD)
+    soft_shadow(canvas, rect, RADIUS_CARD, ground=COLOR_BG)
     rounded_rect(canvas, rect, COLOR_SUNKEN, RADIUS_CARD, -1)
 
     if frame is not None:
@@ -2207,11 +2248,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable the cube reorientation screen",
     )
+    parser.add_argument(
+        "--no-shadows",
+        action="store_true",
+        help=(
+            "Draw the flat theme without soft shadows. Cheaper per frame, for "
+            "a machine that cannot spare them"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    set_shadows_enabled(not args.no_shadows)
     enable_mujoco = not args.no_mujoco
     enable_hardware = not args.no_hardware and args.mode in ("hardware", "both")
 

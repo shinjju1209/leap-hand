@@ -212,6 +212,56 @@ class LogoTests(unittest.TestCase):
         self.assertTrue((canvas == 247).all(), "it drew anyway")
 
 
+class ShadowCostTests(unittest.TestCase):
+    """Shadows were what made the redesign too slow to run a kiosk on."""
+
+    def tearDown(self) -> None:
+        booth_app.set_shadows_enabled(True)
+
+    def test_a_shadow_on_flat_ground_is_composited_once(self) -> None:
+        """The viewport is the same rectangle, on the same page, every frame."""
+        booth_app._shadow_on_ground.cache_clear()
+        canvas = np.full((700, 900, 3), COLOR_BG, np.uint8)
+        for _ in range(5):
+            soft_shadow(canvas, (40, 85, 800, 530), ground=COLOR_BG)
+        info = booth_app._shadow_on_ground.cache_info()
+        self.assertEqual(info.misses, 1, "the composite was redone")
+        self.assertEqual(info.hits, 4)
+
+    def test_the_cached_path_matches_the_computed_one(self) -> None:
+        """The fast path has to be the same picture, not merely a fast one."""
+        rect = (30, 30, 120, 60)
+        slow = np.full((200, 300, 3), COLOR_BG, np.uint8)
+        fast = slow.copy()
+        soft_shadow(slow, rect)
+        soft_shadow(fast, rect, ground=COLOR_BG)
+        self.assertLessEqual(int(np.abs(slow.astype(int) - fast.astype(int)).max()), 1,
+                             "the cached shadow differs from the computed one")
+
+    def test_shadows_can_be_turned_off_wholesale(self) -> None:
+        canvas = np.full((200, 300, 3), COLOR_BG, np.uint8)
+        booth_app.set_shadows_enabled(False)
+        soft_shadow(canvas, (60, 60, 180, 80))
+        self.assertTrue((canvas == COLOR_BG).all(), "a shadow was drawn anyway")
+
+    def test_the_flag_reaches_the_switch(self) -> None:
+        args = booth_app.parse_args(["--no-shadows"])
+        self.assertTrue(args.no_shadows)
+        args = booth_app.parse_args([])
+        self.assertFalse(args.no_shadows)
+
+    def test_a_screen_still_renders_without_shadows(self) -> None:
+        booth_app.set_shadows_enabled(False)
+        with patch("booth_app.MujocoHandController"), \
+             patch("booth_app.LeapHandHardwareController"):
+            app = BoothKioskApp(enable_mujoco=False, enable_hardware=False,
+                                enable_reorient=False)
+        for screen in AppScreen:
+            app.current_screen = screen
+            canvas = app.render(None, [])
+            self.assertEqual(canvas.shape, (app.height, app.width, 3))
+
+
 class CameraFallbackTests(unittest.TestCase):
     """Opening an index is not the same as getting a picture out of it."""
 
