@@ -212,6 +212,48 @@ class LogoTests(unittest.TestCase):
         self.assertTrue((canvas == 247).all(), "it drew anyway")
 
 
+class CameraFallbackTests(unittest.TestCase):
+    """Opening an index is not the same as getting a picture out of it."""
+
+    @staticmethod
+    def _capture(opened: bool, reads: bool) -> MagicMock:
+        capture = MagicMock()
+        capture.isOpened.return_value = opened
+        capture.read.return_value = (reads, np.zeros((4, 4, 3), np.uint8))
+        return capture
+
+    def test_the_preferred_index_is_used_when_it_works(self) -> None:
+        good = self._capture(True, True)
+        with patch("booth_app.cv2.VideoCapture", return_value=good) as factory:
+            self.assertIs(booth_app.open_camera(0), good)
+        factory.assert_called_once_with(0)
+
+    def test_an_index_that_opens_but_reads_nothing_is_passed_over(self) -> None:
+        """This machine has one: /dev/video0 opens and never yields a frame.
+
+        The booth defaults to index 0, so without this it sat in GUI-only mode
+        on a machine with a working camera plugged in.
+        """
+        silent, working = self._capture(True, False), self._capture(True, True)
+        with patch("booth_app.cv2.VideoCapture",
+                   side_effect=[silent, working]) as factory:
+            self.assertIs(booth_app.open_camera(0), working)
+        self.assertEqual([call.args[0] for call in factory.call_args_list], [0, 1])
+        silent.release.assert_called_once()
+
+    def test_a_rejected_capture_is_released(self) -> None:
+        """Otherwise the device stays claimed and the next open fails too."""
+        dead = self._capture(False, False)
+        with patch("booth_app.cv2.VideoCapture", return_value=dead):
+            self.assertIsNone(booth_app.open_camera(0, scan_limit=3))
+        self.assertEqual(dead.release.call_count, 3)
+
+    def test_nothing_working_reports_none_rather_than_a_dead_capture(self) -> None:
+        with patch("booth_app.cv2.VideoCapture",
+                   return_value=self._capture(False, False)):
+            self.assertIsNone(booth_app.open_camera(2, scan_limit=4))
+
+
 class ButtonAppearanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.canvas = np.full((200, 400, 3), 247, np.uint8)

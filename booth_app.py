@@ -401,6 +401,33 @@ def draw_logo(canvas: np.ndarray, logo: np.ndarray, origin: tuple[int, int]) -> 
     return w
 
 
+CAMERA_SCAN_LIMIT = 6
+
+
+def open_camera(preferred: int, scan_limit: int = CAMERA_SCAN_LIMIT):
+    """Open the first camera that actually delivers a frame.
+
+    Opening an index is not enough: a machine can expose several /dev/video
+    nodes per physical camera, where some open and then read nothing. This
+    machine is one of them -- index 0 opens as a device and hands back no
+    frames, while 1 works -- so the booth would sit in GUI-only mode on the
+    default settings. The preferred index is tried first and the rest scanned
+    only if it fails.
+
+    Returns an opened VideoCapture, or None if nothing on the machine works.
+    """
+    for index in [preferred] + [i for i in range(scan_limit) if i != preferred]:
+        capture = cv2.VideoCapture(index)
+        if capture.isOpened():
+            frame_ok, _ = capture.read()
+            if frame_ok:
+                if index != preferred:
+                    print(f"[BOOTH] Camera {preferred} gave no frames; using {index}.")
+                return capture
+        capture.release()
+    return None
+
+
 VIEWPORT = (40, 85, 800, 530)   # where a screen's main image goes
 
 
@@ -2016,9 +2043,13 @@ class BoothKioskApp:
         cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(self.window_name, self.on_mouse_event)
 
-        cap = cv2.VideoCapture(self.camera_id)
-        if not cap.isOpened():
-            print(f"[BOOTH WARN] Camera index {self.camera_id} could not be opened. Running in GUI-only mode.")
+        cap = open_camera(self.camera_id)
+        if cap is None:
+            cap = cv2.VideoCapture(self.camera_id)  # a closed capture to read from
+            print(
+                f"[BOOTH WARN] No working camera found (tried index {self.camera_id} "
+                "and 0-5). Running in GUI-only mode."
+            )
 
         try:
             while True:
