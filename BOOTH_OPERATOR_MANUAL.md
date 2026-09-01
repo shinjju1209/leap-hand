@@ -23,7 +23,7 @@
 
 ```bash
 # 1. 터미널 실행 및 작업 디렉토리 이동
-cd ~/Documents/antigravity/charming-pascal/leap-hand
+cd <저장소를 받은 경로>/leap-hand      # 예: cd ~/Projects/leap-hand
 source .venv/bin/activate
 
 # 2. 시리얼 포트 쓰기 권한 및 저지연 타이머 설정

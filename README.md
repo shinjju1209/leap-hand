@@ -383,11 +383,28 @@ cd ~/Projects
 tar czf leap-hand-booth.tar.gz --exclude=.venv --exclude=.git leap-hand/
 ```
 
-실물 손을 붙이려면 시리얼 포트 접근 권한이 필요합니다.
+실물 손을 붙이려면 매번 두 가지를 해야 합니다. USB 를 다시 꽂으면 둘 다
+초기화되므로, 부스를 열 때마다 반복합니다.
+
+```bash
+sudo chmod 666 /dev/ttyUSB0
+echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+```
+
+`latency_timer` 를 빠뜨리기 쉬운데, 이것이 제어 주기를 직접 결정합니다. FTDI
+기본값은 16 ms 여서 명령 한 번마다 그만큼 기다리게 되고, 손이 늦게 따라오거나
+끊겨 보입니다. 1 로 낮추면 사라집니다.
+
+권한 쪽은 로그인 그룹으로 한 번에 해결할 수도 있습니다. 이 경우 `chmod` 는
+다시 필요 없지만 `latency_timer` 는 여전히 매번 설정해야 합니다.
 
 ```bash
 sudo usermod -aG dialout $USER      # 로그아웃 후 다시 로그인
 ```
+
+전체 하드웨어 절차와 사전 점검은
+[hardware_procedure.md](hardware_procedure.md) 와
+[BOOTH_OPERATOR_MANUAL.md](BOOTH_OPERATOR_MANUAL.md) 에 있습니다.
 
 설치 확인은 테스트로 합니다. 하드웨어도 카메라도 필요 없습니다.
 
