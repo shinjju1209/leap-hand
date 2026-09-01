@@ -12,6 +12,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+# 부스 키오스크만 돌릴 것이라면 다음이 훨씬 가볍습니다 (10절 참고)
+# pip install -r requirements-booth.txt
 ```
 
 ### Windows (PowerShell)
@@ -412,9 +414,18 @@ sudo usermod -aG dialout $USER      # 로그아웃 후 다시 로그인
 python -m unittest tests.test_booth_theme tests.test_cube_reorient tests.test_booth_app
 ```
 
-> `requirements.txt` 의 `torch` 와 `onnxruntime` 은 부스 앱이 쓰지 않습니다.
-> 9절의 RL 배포 스크립트용이므로, 부스만 돌릴 것이라면 설치에 실패해도
-> 무방합니다 (해당 테스트 4개만 건너뜁니다).
+부스만 돌릴 것이라면 `requirements-booth.txt` 를 쓰세요. `requirements.txt`
+는 9절의 RL 배포 스크립트를 위해 `torch` 와 `onnxruntime` 을 함께 설치하는데,
+`torch` 가 CUDA 런타임 전체(cuda-toolkit, cudnn, nccl, triton 등)를 끌고 옵니다.
+패키지 29개, 수 GB 이고 부스는 그중 무엇도 임포트하지 않습니다.
+
+```bash
+pip install -r requirements-booth.txt
+```
+
+부스가 실제로 필요로 하는 것은 `mediapipe`, `mujoco`, `numpy` 넷이며,
+실물 손을 붙일 때 `dynamixel-sdk` 와 `PyYAML` 이 더해집니다. OpenCV 는
+mediapipe 가 의존성으로 함께 설치합니다.
 
 ### 1) 실행 방법
 

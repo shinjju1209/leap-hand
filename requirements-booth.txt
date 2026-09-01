@@ -1,0 +1,14 @@
+# The booth kiosk and everything it runs -- teleoperation, RPS, the gesture
+# showcase, and the cube reorientation policy.
+#
+# requirements.txt additionally installs torch and onnxruntime, which belong to
+# the separate RL deployment scripts (section 9 of the README). Those pull the
+# whole CUDA runtime -- cuda-toolkit, cudnn, nccl, triton -- and nothing in the
+# booth imports them. On an exhibition laptop that is several gigabytes of
+# download for code that never runs.
+
+mediapipe==0.10.35      # hand tracking; brings opencv-contrib and matplotlib
+mujoco==3.12.0          # the digital twin and the reorientation scene
+numpy==2.5.2
+dynamixel-sdk==4.0.5    # the hand's motors; only needed with --mode hardware
+PyYAML==6.0.3           # motor calibration file
