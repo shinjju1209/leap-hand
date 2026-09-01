@@ -22,6 +22,9 @@ class BoothAppTests(unittest.TestCase):
     """Test suite verifying booth app state transitions, scoring, and UI components."""
 
     def setUp(self) -> None:
+        tracker_patcher = patch("booth_app.MediaPipeTracker")
+        self.mock_tracker_class = tracker_patcher.start()
+        self.addCleanup(tracker_patcher.stop)
         self.button = Button(
             id="test_btn",
             label="Test Button",
@@ -138,6 +141,121 @@ class BoothAppTests(unittest.TestCase):
 
     @patch("booth_app.MujocoHandController")
     @patch("booth_app.LeapHandHardwareController")
+    def test_tracking_loss_heartbeats_then_auto_disarms(
+        self,
+        mock_hw_class: MagicMock,
+        mock_mj: MagicMock,
+    ) -> None:
+        app = BoothKioskApp(
+            enable_mujoco=False,
+            enable_hardware=False,
+            tracking_loss_hold_seconds=0.2,
+            tracking_loss_disarm_seconds=0.5,
+        )
+        hardware = mock_hw_class.return_value
+        hardware.torque_enabled = True
+        app.hardware_controller = hardware
+        app.armed = True
+        app.tracking_loss_started_at = 10.0
+
+        app._handle_teleop_tracking_loss(10.3)
+        hardware.heartbeat.assert_called_once_with()
+        self.assertTrue(app.armed)
+        self.assertIn("holding last pose", app.status_message)
+
+        app._handle_teleop_tracking_loss(10.6)
+        hardware.emergency_stop.assert_called_once_with()
+        self.assertFalse(app.armed)
+        self.assertIn("automatically DISARMED", app.status_message)
+
+    @patch("booth_app.MujocoHandController")
+    @patch("booth_app.LeapHandHardwareController")
+    def test_heartbeat_failure_immediately_disarms(
+        self,
+        mock_hw_class: MagicMock,
+        mock_mj: MagicMock,
+    ) -> None:
+        app = BoothKioskApp(enable_mujoco=False, enable_hardware=False)
+        hardware = mock_hw_class.return_value
+        hardware.torque_enabled = True
+        hardware.heartbeat.side_effect = OSError("serial link lost")
+        app.hardware_controller = hardware
+        app.armed = True
+
+        app._handle_teleop_tracking_loss(20.0)
+
+        hardware.emergency_stop.assert_called_once_with()
+        self.assertFalse(app.armed)
+        self.assertIn("heartbeat failed", app.status_message)
+
+    @patch("booth_app.MujocoHandController")
+    @patch("booth_app.LeapHandHardwareController")
+    def test_arm_failure_does_not_leave_false_armed_state(
+        self,
+        mock_hw_class: MagicMock,
+        mock_mj: MagicMock,
+    ) -> None:
+        app = BoothKioskApp(enable_mujoco=False, enable_hardware=False)
+        hardware = mock_hw_class.return_value
+        hardware.enable_torque.side_effect = OSError("watchdog locked")
+        app.hardware_controller = hardware
+
+        app.arm_robot()
+
+        self.assertFalse(app.armed)
+        hardware.emergency_stop.assert_called_once_with()
+        self.assertIn("ARM failed", app.status_message)
+
+    @patch("booth_app.MujocoHandController")
+    @patch("booth_app.LeapHandHardwareController")
+    def test_shutdown_uses_close_and_releases_all_resources(
+        self,
+        mock_hw_class: MagicMock,
+        mock_mj_class: MagicMock,
+    ) -> None:
+        app = BoothKioskApp(enable_mujoco=False, enable_hardware=False)
+        hardware = mock_hw_class.return_value
+        mujoco = mock_mj_class.return_value
+        tracker = app.tracker
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        app.hardware_controller = hardware
+        app.mujoco_controller = mujoco
+
+        with patch("booth_app.cv2.destroyAllWindows"):
+            app.shutdown(capture)
+
+        hardware.close.assert_called_once_with()
+        mujoco.close.assert_called_once_with()
+        tracker.close.assert_called_once_with()
+        capture.release.assert_called_once_with()
+
+    @patch("booth_app.MujocoHandController")
+    @patch("booth_app.LeapHandHardwareController")
+    def test_ctrl_c_exits_without_propagating_keyboard_interrupt(
+        self,
+        mock_hw: MagicMock,
+        mock_mj: MagicMock,
+    ) -> None:
+        app = BoothKioskApp(enable_mujoco=False, enable_hardware=False)
+        app.tracker.process_frame.side_effect = KeyboardInterrupt
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        capture.read.return_value = (True, np.zeros((8, 8, 3), dtype=np.uint8))
+
+        with (
+            patch("booth_app.cv2.VideoCapture", return_value=capture),
+            patch("booth_app.cv2.namedWindow"),
+            patch("booth_app.cv2.setMouseCallback"),
+            patch("booth_app.cv2.destroyAllWindows"),
+        ):
+            self.assertEqual(app.run(), 0)
+
+        app.tracker.close.assert_called_once_with()
+        capture.release.assert_called_once_with()
+
+    @patch("booth_app.MujocoHandController")
+    @patch("booth_app.LeapHandHardwareController")
     def test_rps_game_lifecycle(
         self,
         mock_hw: MagicMock,
@@ -225,6 +343,29 @@ class BoothAppTests(unittest.TestCase):
         self.assertEqual(args.mode, "both")
         self.assertEqual(args.port, "/dev/ttyUSB1")
         self.assertEqual(args.profile, "hamin")
+        self.assertEqual(args.tracking_loss_hold_seconds, 0.2)
+        self.assertEqual(args.tracking_loss_disarm_seconds, 0.5)
+
+    def test_tracking_loss_timeouts_are_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            BoothKioskApp(
+                enable_mujoco=False,
+                enable_hardware=False,
+                tracking_loss_hold_seconds=0.5,
+                tracking_loss_disarm_seconds=0.5,
+            )
+
+    @patch("booth_app.MujocoHandController")
+    @patch("booth_app.LeapHandHardwareController")
+    def test_quit_button_requests_clean_loop_exit(
+        self,
+        mock_hw: MagicMock,
+        mock_mj: MagicMock,
+    ) -> None:
+        app = BoothKioskApp(enable_mujoco=False, enable_hardware=False)
+        self.assertFalse(app.exit_requested)
+        app.handle_action("quit_app")
+        self.assertTrue(app.exit_requested)
 
 
 if __name__ == "__main__":

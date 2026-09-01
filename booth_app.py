@@ -13,6 +13,7 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -23,6 +24,42 @@ from typing import Any, Callable
 
 import cv2
 import numpy as np
+
+
+def _configure_opencv_gui_environment() -> None:
+    """Use the XWayland backend and a real font directory for OpenCV Qt."""
+    if not sys.platform.startswith("linux"):
+        return
+
+    # The OpenCV wheel bundled in this project only ships the xcb plugin. Qt
+    # otherwise emits a Wayland warning even though it falls back to XWayland.
+    qt_platform = os.environ.get("QT_QPA_PLATFORM", "").lower()
+    if (
+        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+        and os.environ.get("DISPLAY")
+        and qt_platform in ("", "xcb")
+    ):
+        os.environ["XDG_SESSION_TYPE"] = "x11"
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
+    configured_font_dir_value = os.environ.get("QT_QPA_FONTDIR")
+    if (
+        configured_font_dir_value
+        and Path(configured_font_dir_value).is_dir()
+    ):
+        return
+
+    for candidate in (
+        Path("/usr/share/fonts/truetype/dejavu"),
+        Path("/usr/share/fonts/truetype/liberation2"),
+        Path("/usr/share/fonts"),
+    ):
+        if candidate.is_dir():
+            os.environ["QT_QPA_FONTDIR"] = str(candidate)
+            break
+
+
+_configure_opencv_gui_environment()
 
 from hand_angles import (
     ANGLE_NAMES,
@@ -109,12 +146,24 @@ def get_hand_posture(name: str) -> np.ndarray:
 
 
 class MediaPipeTracker:
-    """Wrapper around MediaPipe HandLandmarker for video frame inference."""
+    """Non-blocking MediaPipe HandLandmarker wrapper for a live camera stream."""
 
-    def __init__(self, model_path: Path = DEFAULT_MODEL_PATH) -> None:
+    def __init__(
+        self,
+        model_path: Path = DEFAULT_MODEL_PATH,
+        *,
+        result_max_age_seconds: float = 0.25,
+    ) -> None:
         self.model_path = model_path
         self.landmarker = None
         self.last_timestamp_ms = 0
+        self.result_max_age_seconds = float(result_max_age_seconds)
+        self._result_lock = threading.Lock()
+        self._latest_landmarks: list[Any] = []
+        self._latest_result_time = 0.0
+        self._latest_result_timestamp_ms = -1
+        self._closed = False
+        self._reported_async_error = False
         if model_path.is_file():
             try:
                 import mediapipe as mp
@@ -123,17 +172,32 @@ class MediaPipeTracker:
                     base_options=mp.tasks.BaseOptions(
                         model_asset_path=str(model_path)
                     ),
-                    running_mode=mp.tasks.vision.RunningMode.VIDEO,
+                    running_mode=mp.tasks.vision.RunningMode.LIVE_STREAM,
                     num_hands=1,
                     min_hand_detection_confidence=0.5,
                     min_hand_presence_confidence=0.5,
                     min_tracking_confidence=0.5,
+                    result_callback=self._on_result,
                 )
                 self.landmarker = mp.tasks.vision.HandLandmarker.create_from_options(
                     options
                 )
             except Exception as e:
                 print(f"[BOOTH WARN] Failed to load MediaPipe HandLandmarker: {e}")
+
+    def _on_result(
+        self,
+        result: Any,
+        output_image: Any,
+        timestamp_ms: int,
+    ) -> None:
+        del output_image
+        with self._result_lock:
+            if self._closed or timestamp_ms < self._latest_result_timestamp_ms:
+                return
+            self._latest_landmarks = list(result.hand_landmarks or [])
+            self._latest_result_time = time.monotonic()
+            self._latest_result_timestamp_ms = int(timestamp_ms)
 
     def process_frame(self, bgr_frame: np.ndarray | None) -> list[Any]:
         if self.landmarker is None or bgr_frame is None:
@@ -145,8 +209,31 @@ class MediaPipeTracker:
         now_ms = time.perf_counter_ns() // 1_000_000
         now_ms = max(now_ms, self.last_timestamp_ms + 1)
         self.last_timestamp_ms = now_ms
-        res = self.landmarker.detect_for_video(mp_image, now_ms)
-        return res.hand_landmarks or []
+        try:
+            # LIVE_STREAM accepts the frame and returns immediately. MediaPipe
+            # drops queued frames when inference is slower than the camera.
+            self.landmarker.detect_async(mp_image, now_ms)
+            self._reported_async_error = False
+        except Exception as exc:
+            if not self._reported_async_error:
+                print(f"[BOOTH WARN] MediaPipe async detection failed: {exc}")
+                self._reported_async_error = True
+
+        now = time.monotonic()
+        with self._result_lock:
+            if now - self._latest_result_time > self.result_max_age_seconds:
+                return []
+            return list(self._latest_landmarks)
+
+    def close(self) -> None:
+        """Stop callbacks and release the native MediaPipe task."""
+        with self._result_lock:
+            if self._closed:
+                return
+            self._closed = True
+        if self.landmarker is not None:
+            self.landmarker.close()
+            self.landmarker = None
 
 
 class AppScreen(Enum):
@@ -270,6 +357,8 @@ class BoothKioskApp:
         current_limit: int = 350,
         max_joint_speed: float = 350.0,
         max_tracking_error: float = 50.0,
+        tracking_loss_hold_seconds: float = 0.2,
+        tracking_loss_disarm_seconds: float = 0.5,
         enable_mujoco: bool = True,
         enable_hardware: bool = False,
         width: int = 1280,
@@ -283,6 +372,15 @@ class BoothKioskApp:
         self.current_limit = current_limit
         self.max_joint_speed = max_joint_speed
         self.max_tracking_error = max_tracking_error
+        if tracking_loss_hold_seconds < 0.0:
+            raise ValueError("tracking_loss_hold_seconds must be non-negative")
+        if tracking_loss_disarm_seconds <= tracking_loss_hold_seconds:
+            raise ValueError(
+                "tracking_loss_disarm_seconds must be greater than "
+                "tracking_loss_hold_seconds"
+            )
+        self.tracking_loss_hold_seconds = float(tracking_loss_hold_seconds)
+        self.tracking_loss_disarm_seconds = float(tracking_loss_disarm_seconds)
         self.enable_mujoco = enable_mujoco
         self.enable_hardware = enable_hardware
         self.width = width
@@ -301,6 +399,8 @@ class BoothKioskApp:
 
         # Teleop State
         self.armed = False
+        self.exit_requested = False
+        self.tracking_loss_started_at: float | None = None
         self.calib_open_in_progress = False
         self.calib_fist_in_progress = False
 
@@ -606,6 +706,11 @@ class BoothKioskApp:
                 self.status_message = f"LEAP Hand connected on {self.port}."
             except Exception as e:
                 print(f"[BOOTH WARN] Hardware connection skipped: {e}")
+                if self.hardware_controller is not None:
+                    try:
+                        self.hardware_controller.close()
+                    except Exception:
+                        pass
                 self.hardware_controller = None
 
     def send_robot_posture_degrees(self, posture_degrees: Sequence[float]) -> None:
@@ -707,6 +812,8 @@ class BoothKioskApp:
             self.disarm_robot()
             self.status_message = "Main Menu. Select a mode to begin."
             self.status_color = COLOR_TEXT_MAIN
+        elif action_id == "quit_app":
+            self.exit_requested = True
 
         # Teleop Actions
         elif action_id == "calib_open":
@@ -775,33 +882,85 @@ class BoothKioskApp:
 
     def arm_robot(self) -> None:
         """Enable hardware torque and activate teleoperation tracking."""
-        self.armed = True
         if self.hardware_controller is not None:
             try:
                 self.hardware_controller.enable_torque()
             except Exception as e:
                 print(f"[HARDWARE ERROR] Failed to enable torque: {e}")
-        for btn in self.buttons[AppScreen.TELEOP]:
-            if btn.id == "toggle_arm":
-                btn.active = True
-                btn.label = "ARMED (Tracking Active)"
+                try:
+                    self.hardware_controller.emergency_stop()
+                except Exception:
+                    pass
+                self.armed = False
+                self._update_arm_button()
+                self.status_message = f"Hardware ARM failed: {e}"
+                self.status_color = COLOR_DANGER
+                return
+
+        self.armed = True
+        self.tracking_loss_started_at = None
+        self._update_arm_button()
         self.status_message = "Robot ARMED! Hand movements will now be followed."
         self.status_color = COLOR_SUCCESS
 
-    def disarm_robot(self) -> None:
+    def _update_arm_button(self) -> None:
+        for btn in self.buttons[AppScreen.TELEOP]:
+            if btn.id == "toggle_arm":
+                btn.active = self.armed
+                btn.label = (
+                    "ARMED (Tracking Active)"
+                    if self.armed
+                    else "ARM / Follow Hand"
+                )
+
+    def disarm_robot(self, reason: str | None = None) -> None:
         """Disable torque and safely park robot hand."""
         self.armed = False
+        self.tracking_loss_started_at = None
         if self.hardware_controller is not None:
             try:
                 self.hardware_controller.emergency_stop()
             except Exception as e:
                 print(f"[HARDWARE ERROR] Emergency stop: {e}")
-        for btn in self.buttons[AppScreen.TELEOP]:
-            if btn.id == "toggle_arm":
-                btn.active = False
-                btn.label = "ARM / Follow Hand"
-        self.status_message = "Robot DISARMED (Holding / Torque Paused)."
-        self.status_color = COLOR_WARNING
+        self._update_arm_button()
+        self.status_message = reason or "Robot DISARMED (Holding / Torque Paused)."
+        self.status_color = COLOR_DANGER if reason else COLOR_WARNING
+
+    def _handle_teleop_tracking_loss(self, now: float) -> None:
+        """Hold the last goal with heartbeat, then torque off on prolonged loss."""
+        if not self.armed:
+            self.tracking_loss_started_at = None
+            return
+
+        if self.tracking_loss_started_at is None:
+            self.tracking_loss_started_at = now
+        loss_duration = now - self.tracking_loss_started_at
+
+        if loss_duration >= self.tracking_loss_disarm_seconds:
+            message = (
+                f"Tracking lost for {loss_duration:.1f}s - automatically DISARMED."
+            )
+            print(f"[HARDWARE SAFETY] {message}", flush=True)
+            self.disarm_robot(message)
+            return
+
+        if self.hardware_controller is not None:
+            if not self.hardware_controller.torque_enabled:
+                self.disarm_robot("Hardware torque is off - DISARMED.")
+                return
+            try:
+                self.hardware_controller.heartbeat()
+            except Exception as exc:
+                message = f"Hardware heartbeat failed - DISARMED: {exc}"
+                print(f"[HARDWARE ERROR] {message}", flush=True)
+                self.disarm_robot(message)
+                return
+
+        if loss_duration >= self.tracking_loss_hold_seconds:
+            self.status_message = (
+                f"Hand tracking lost ({loss_duration:.1f}s) - holding last pose."
+            )
+            self.status_color = COLOR_WARNING
 
     def start_rps_countdown(self) -> None:
         """Begin a 3-2-1 Rock-Paper-Scissors match."""
@@ -850,10 +1009,24 @@ class BoothKioskApp:
         self.status_message = f"Animation Running: {display_name}"
         self.status_color = COLOR_PRIMARY
 
-    def update_teleop_frame(self, frame: np.ndarray, landmarks_list: list[Any]) -> None:
+    def update_teleop_frame(
+        self,
+        frame: np.ndarray | None,
+        landmarks_list: list[Any],
+    ) -> None:
         """Process teleoperation hand tracking, calibration, and joint commanding."""
+        now = time.monotonic()
         if not landmarks_list:
+            self._handle_teleop_tracking_loss(now)
             return
+
+        tracking_recovered = self.tracking_loss_started_at is not None
+        self.tracking_loss_started_at = None
+        if tracking_recovered:
+            self.filter.reset()
+            if self.armed:
+                self.status_message = "Hand tracking recovered - live control resumed."
+                self.status_color = COLOR_SUCCESS
 
         landmarks = landmarks_list[0]
         raw_angles = calculate_leap_control_angles(landmarks)
@@ -873,7 +1046,7 @@ class BoothKioskApp:
 
         # Joint angle calculation & calibration
         calibrated_angles = self.calibrator.apply("Right", raw_angles)
-        smoothed_angles = self.filter.filter(calibrated_angles, time.monotonic())
+        smoothed_angles = self.filter.filter(calibrated_angles, now)
 
         self.current_joint_angles = smoothed_angles.copy()
         self.target_joint_angles = smoothed_angles.copy()
@@ -885,6 +1058,7 @@ class BoothKioskApp:
                     self.hardware_controller.command_degrees(smoothed_angles)
                 except Exception as e:
                     print(f"[HARDWARE ERROR] Command failed: {e}")
+                    self.disarm_robot(f"Hardware command failed - DISARMED: {e}")
 
         if self.mujoco_controller is not None:
             self.mujoco_controller.set_target_degrees(smoothed_angles)
@@ -1095,8 +1269,15 @@ class BoothKioskApp:
                 cv2.LINE_AA,
             )
 
-        arm_text = "ARMED (Tracking Active)" if self.armed else "DISARMED (Paused)"
-        arm_color = COLOR_SUCCESS if self.armed else COLOR_WARNING
+        if self.armed and self.tracking_loss_started_at is not None:
+            arm_text = "ARMED (Holding Last Pose)"
+            arm_color = COLOR_WARNING
+        elif self.armed:
+            arm_text = "ARMED (Tracking Active)"
+            arm_color = COLOR_SUCCESS
+        else:
+            arm_text = "DISARMED (Paused)"
+            arm_color = COLOR_WARNING
         cv2.rectangle(canvas, (vx + 20, vy + 20), (vx + 340, vy + 55), (20, 20, 20), -1)
         cv2.putText(
             canvas,
@@ -1277,6 +1458,35 @@ class BoothKioskApp:
             cv2.LINE_AA,
         )
 
+    def shutdown(self, cap: Any | None = None) -> None:
+        """Safely release hardware, native trackers, camera, and GUI resources."""
+        self.disarm_robot()
+
+        if self.hardware_controller is not None:
+            try:
+                self.hardware_controller.close()
+            except Exception as exc:
+                print(f"[BOOTH WARN] Hardware close failed: {exc}")
+            finally:
+                self.hardware_controller = None
+
+        if self.mujoco_controller is not None:
+            try:
+                self.mujoco_controller.close()
+            except Exception as exc:
+                print(f"[BOOTH WARN] MuJoCo close failed: {exc}")
+            finally:
+                self.mujoco_controller = None
+
+        try:
+            self.tracker.close()
+        except Exception as exc:
+            print(f"[BOOTH WARN] MediaPipe close failed: {exc}")
+
+        if cap is not None and cap.isOpened():
+            cap.release()
+        cv2.destroyAllWindows()
+
     def run(self) -> int:
         """Main application loop."""
         print("\n" + "=" * 65)
@@ -1322,7 +1532,7 @@ class BoothKioskApp:
                 cv2.imshow(self.window_name, canvas)
 
                 key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), ord("Q"), 27):
+                if self.exit_requested or key in (ord("q"), ord("Q"), 27):
                     print("[BOOTH] Exit requested by user.")
                     break
 
@@ -1383,13 +1593,10 @@ class BoothKioskApp:
                     elif key in (ord("v"), ord("V")):
                         self.handle_action("showcase_wave_hello")
 
+        except KeyboardInterrupt:
+            print("\n[BOOTH] Ctrl+C received. Shutting down safely.", flush=True)
         finally:
-            if cap.isOpened():
-                cap.release()
-            cv2.destroyAllWindows()
-            self.disarm_robot()
-            if self.hardware_controller is not None:
-                self.hardware_controller.disconnect()
+            self.shutdown(cap)
             print("[BOOTH] Kiosk shutdown complete.")
 
         return 0
@@ -1440,6 +1647,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Motor current limit in mA (default: 350)",
     )
     parser.add_argument(
+        "--tracking-loss-hold-seconds",
+        type=float,
+        default=0.2,
+        help="Tracking-loss delay before showing HOLDING status (default: 0.2)",
+    )
+    parser.add_argument(
+        "--tracking-loss-disarm-seconds",
+        type=float,
+        default=0.5,
+        help="Tracking-loss timeout before automatic torque-off (default: 0.5)",
+    )
+    parser.add_argument(
         "--no-mujoco",
         action="store_true",
         help="Disable MuJoCo simulation viewer",
@@ -1465,6 +1684,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         motor_calib_path=args.motor_calib_path,
         camera_id=args.camera_id,
         current_limit=args.current_limit,
+        tracking_loss_hold_seconds=args.tracking_loss_hold_seconds,
+        tracking_loss_disarm_seconds=args.tracking_loss_disarm_seconds,
         enable_mujoco=enable_mujoco,
         enable_hardware=enable_hardware,
     )
