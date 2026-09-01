@@ -18,6 +18,7 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -188,6 +189,7 @@ class RpsState(Enum):
 # keeps the corner radius and the shadow the same everywhere.
 
 RADIUS_CARD = 12
+SHADOW_DROP = 3   # a shadow sits slightly below what casts it
 RADIUS_WELL = 10
 
 # Type scale. Thirteen different sizes had accumulated across the screens; five
@@ -251,6 +253,28 @@ def pill_rect(
     rounded_rect(canvas, rect, color, rect[3] // 2, thickness)
 
 
+@lru_cache(maxsize=64)
+def _shadow_mask(
+    width: int, height: int, radius: int, spread: int, strength: float
+) -> np.ndarray:
+    """The alpha of one shadow shape, built once and reused.
+
+    Concentric rounded rectangles at a low alpha stand in for a blur. Only a
+    handful of distinct button and card shapes exist, so building the falloff
+    per shape and caching it turns a per-frame cost into a startup one.
+    """
+    pad = max(2, spread)
+    mask = np.zeros((height + 2 * pad + SHADOW_DROP, width + 2 * pad), np.float32)
+    layers = max(1, spread // 2)
+    for index in range(layers, 0, -1):
+        grow = index * 2
+        band = (pad - grow, pad - grow + SHADOW_DROP, width + 2 * grow, height + 2 * grow)
+        layer = np.zeros_like(mask)
+        rounded_rect(layer, band, 1.0, radius + grow, -1)
+        mask += layer * (strength / layers)
+    return np.clip(mask, 0.0, 1.0)[:, :, None]
+
+
 def soft_shadow(
     canvas: np.ndarray,
     rect: tuple[int, int, int, int],
@@ -261,24 +285,34 @@ def soft_shadow(
     """Lay a soft blue-cast shadow under a rectangle.
 
     On a light ground a card needs somewhere to sit, and a hard border makes it
-    look boxed rather than raised. Concentric rounded rectangles at a low alpha
-    approximate a blur cheaply enough to run every frame; a real Gaussian over
-    the whole canvas costs far more than the few milliseconds a kiosk redraw
-    has to spare.
+    look boxed rather than raised.
+
+    Only the pixels the shadow actually covers are touched. Blending the whole
+    canvas once per shadow -- which is what this did first -- cost around 20 ms
+    a frame on the screens carrying a dozen buttons, and the kiosk visibly
+    stuttered; the region is a few hundred pixels across.
     """
     x, y, w, h = rect
-    layers = max(1, spread // 2)
-    for index in range(layers, 0, -1):
-        grow = index * 2
-        band = (x - grow, y - grow + 3, w + 2 * grow, h + 2 * grow)
-        if band[0] < 0 or band[1] < 0:
-            continue
-        if band[0] + band[2] > canvas.shape[1] or band[1] + band[3] > canvas.shape[0]:
-            continue
-        overlay = canvas.copy()
-        rounded_rect(overlay, band, COLOR_SHADOW, radius + grow, -1)
-        alpha = strength / layers
-        cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0.0, canvas)
+    if w <= 0 or h <= 0:
+        return
+    pad = max(2, spread)
+    mask = _shadow_mask(w, h, radius, spread, strength)
+
+    # Where the shadow lands, clipped to the canvas, and the matching window
+    # into the mask so the two stay aligned.
+    top, left = y - pad, x - pad
+    canvas_h, canvas_w = canvas.shape[:2]
+    y0, x0 = max(0, top), max(0, left)
+    y1 = min(canvas_h, top + mask.shape[0])
+    x1 = min(canvas_w, left + mask.shape[1])
+    if y0 >= y1 or x0 >= x1:
+        return
+
+    window = mask[y0 - top:y1 - top, x0 - left:x1 - left]
+    region = canvas[y0:y1, x0:x1].astype(np.float32)
+    region *= 1.0 - window
+    region += np.asarray(COLOR_SHADOW, np.float32) * window
+    canvas[y0:y1, x0:x1] = region.astype(np.uint8)
 
 
 def card(
@@ -370,6 +404,26 @@ def draw_logo(canvas: np.ndarray, logo: np.ndarray, origin: tuple[int, int]) -> 
 VIEWPORT = (40, 85, 800, 530)   # where a screen's main image goes
 
 
+@lru_cache(maxsize=16)
+def _corner_mask(
+    width: int, height: int, radius: int
+) -> tuple[tuple[int, int, np.ndarray], ...]:
+    """The four corner patches of a rounded rectangle, as alpha.
+
+    Returned as (y, x, alpha) so a caller can blend just those squares rather
+    than testing every pixel of an image against a full-size mask.
+    """
+    full = np.zeros((height, width), np.float32)
+    rounded_rect(full, (0, 0, width, height), 1.0, radius, -1)
+    size = radius + 1
+    return (
+        (0, 0, full[:size, :size, None].copy()),
+        (0, width - size, full[:size, width - size:, None].copy()),
+        (height - size, 0, full[height - size:, :size, None].copy()),
+        (height - size, width - size, full[height - size:, width - size:, None].copy()),
+    )
+
+
 def viewport(
     canvas: np.ndarray,
     rect: tuple[int, int, int, int] = VIEWPORT,
@@ -386,12 +440,17 @@ def viewport(
     rounded_rect(canvas, rect, COLOR_SUNKEN, RADIUS_CARD, -1)
 
     if frame is not None:
-        inner = (x + 5, y + 5, w - 10, h - 10)
-        resized = cv2.resize(frame, (inner[2], inner[3]))
-        mask = np.zeros((inner[3], inner[2]), np.uint8)
-        rounded_rect(mask, (0, 0, inner[2], inner[3]), 255, RADIUS_WELL, -1)
-        region = canvas[inner[1]:inner[1] + inner[3], inner[0]:inner[0] + inner[2]]
-        region[mask > 0] = resized[mask > 0]
+        inner_x, inner_y, inner_w, inner_h = x + 5, y + 5, w - 10, h - 10
+        resized = cv2.resize(frame, (inner_w, inner_h), interpolation=cv2.INTER_AREA)
+        corners = _corner_mask(inner_w, inner_h, RADIUS_WELL)
+        region = canvas[inner_y:inner_y + inner_h, inner_x:inner_x + inner_w]
+        # Only the corners are blended; the rest is a straight copy. Masking the
+        # whole image cost about 12 ms a frame, which is most of a 60 Hz budget
+        # spent rounding four corners.
+        np.copyto(region, resized)
+        for cy, cx, patch in corners:
+            block = region[cy:cy + patch.shape[0], cx:cx + patch.shape[1]]
+            np.copyto(block, (block * patch + COLOR_SUNKEN * (1.0 - patch)).astype(np.uint8))
     else:
         (text_w, _), _ = cv2.getTextSize(placeholder, cv2.FONT_HERSHEY_SIMPLEX,
                                          TYPE_SUBTITLE, 1)
@@ -463,10 +522,12 @@ class Button:
         else:
             fill, border, label_color = COLOR_CARD_BG, COLOR_CARD_BORDER, self.text_color
 
-        if self.enabled and (hovered or self.active):
+        # A resting pill gets its hairline and nothing else -- the site puts
+        # shadows under cards, not under every control, and a shadow per button
+        # per frame was about 4.7 ms of a redraw on the busier screens. Cards
+        # keep theirs, and any button lifts when it is pointed at.
+        if self.enabled and (hovered or self.active or is_card):
             soft_shadow(canvas, self.rect, radius, spread=12, strength=0.13)
-        elif self.enabled:
-            soft_shadow(canvas, self.rect, radius, spread=6, strength=0.07)
 
         rounded_rect(canvas, self.rect, fill, radius, -1)
         rounded_rect(canvas, self.rect, border, radius, 1)

@@ -118,17 +118,34 @@ class DrawingPrimitiveTests(unittest.TestCase):
         self.assertTrue((self.canvas[40, 100] == 255).all())
         self.assertTrue((self.canvas[21, 21] == 0).all(), "the end is square")
 
-    def test_a_shadow_darkens_the_ground_without_covering_the_card(self) -> None:
+    def test_a_shadow_darkens_the_ground_under_what_casts_it(self) -> None:
         canvas = np.full((200, 300, 3), 250, np.uint8)
-        before = canvas[150, 60].copy()
         soft_shadow(canvas, (60, 60, 180, 80))
-        self.assertLess(int(canvas[150, 60].mean()), int(before.mean()),
+        # Directly below the middle, where a shadow is densest. The corners
+        # fall off to nearly nothing by design.
+        self.assertLess(int(canvas[145, 150].mean()), 250,
                         "the shadow did not darken anything")
 
-    def test_a_shadow_near_an_edge_is_skipped_rather_than_wrapping(self) -> None:
+    def test_a_shadow_is_clipped_to_the_canvas(self) -> None:
+        """Flush to every edge: the shadow is cut, not wrapped or refused."""
         canvas = np.full((200, 300, 3), 250, np.uint8)
-        soft_shadow(canvas, (0, 0, 300, 200))  # flush to every edge
-        self.assertTrue((canvas == 250).all(), "an out-of-bounds band was drawn")
+        soft_shadow(canvas, (0, 0, 300, 200))
+        self.assertLessEqual(int(canvas.max()), 250, "a pixel got brighter")
+
+    def test_a_shadow_entirely_off_canvas_draws_nothing(self) -> None:
+        canvas = np.full((200, 300, 3), 250, np.uint8)
+        soft_shadow(canvas, (900, 900, 100, 40))
+        self.assertTrue((canvas == 250).all(), "it drew outside the canvas")
+
+    def test_the_shadow_shape_is_built_once_and_reused(self) -> None:
+        """It is the same few button and card sizes, every frame, forever."""
+        booth_app._shadow_mask.cache_clear()
+        canvas = np.full((200, 300, 3), 250, np.uint8)
+        for _ in range(5):
+            soft_shadow(canvas, (60, 60, 180, 80))
+        info = booth_app._shadow_mask.cache_info()
+        self.assertEqual(info.misses, 1, "the falloff was rebuilt")
+        self.assertEqual(info.hits, 4)
 
     def test_a_card_reports_where_its_body_starts(self) -> None:
         plain = card(self.canvas, (10, 10, 200, 120), shadow=False)
@@ -205,6 +222,24 @@ class ButtonAppearanceTests(unittest.TestCase):
         self.button.draw(self.canvas, (0, 0))
         centre = self.canvas[44, 170]
         self.assertLess(centre.mean(), 200, "an active button did not fill with its accent")
+
+    def test_a_resting_pill_carries_no_shadow(self) -> None:
+        """Shadows are for cards, and for whatever is being pointed at.
+
+        One per button per frame was about 4.7 ms of a redraw on the screens
+        with a dozen of them, and the site puts shadows under cards anyway.
+        """
+        canvas = np.full((200, 400, 3), 247, np.uint8)
+        self.button.draw(canvas, (0, 0))  # not hovered
+        # Just under the button, where a shadow would be densest.
+        self.assertTrue((canvas[73, 170] == 247).all(),
+                        "a resting button cast a shadow")
+
+    def test_a_pointed_at_button_lifts(self) -> None:
+        canvas = np.full((200, 400, 3), 247, np.uint8)
+        self.button.draw(canvas, (170, 44))  # hovered
+        self.assertTrue((canvas[73, 170] != 247).any(),
+                        "a hovered button did not lift off the page")
 
     def test_a_disabled_button_does_not_invite_a_press(self) -> None:
         self.button.enabled = False
