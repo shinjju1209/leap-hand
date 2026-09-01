@@ -59,11 +59,21 @@ python booth_app.py --mode hardware --port /dev/ttyUSB0
 PC에 USB 변환기를 꽂은 후 포트명을 확인합니다.
 
 ```bash
-ls /dev/ttyUSB*
-# 출력 예: /dev/ttyUSB0
+ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+# 출력 예: /dev/ttyUSB0 또는 /dev/ttyUSB1
 ```
 
-> 💡 포트 번호가 `/dev/ttyUSB1` 등으로 변경된 경우, 모든 명령어의 `--port` 뒤에 해당 포트명을 입력하면 됩니다.
+`--port` 뒤의 값은 임의로 정하는 값이 아니라, 위 명령에서 확인한 **해당 컴퓨터의 실제 LEAP Hand 시리얼 장치 경로**여야 합니다. 다른 컴퓨터에서 실행하거나 USB 포트를 다시 연결하면 번호가 바뀔 수 있습니다.
+
+```bash
+# 실제 장치가 /dev/ttyUSB0인 경우
+python leap_hand_hardware_check.py --port /dev/ttyUSB0
+
+# 실제 장치가 /dev/ttyUSB1인 경우
+python leap_hand_hardware_check.py --port /dev/ttyUSB1
+```
+
+> 💡 여러 장치가 표시되면 LEAP Hand USB 어댑터를 뺐다가 다시 연결하여 새로 나타나는 장치명을 확인합니다. 이후 이 매뉴얼의 모든 `--port` 값과 포트 권한 명령에 동일한 장치명을 사용합니다.
 
 ### 2) 포트 권한 및 초고속 저지연(1ms) 모드 설정
 리눅스 기본 USB 시리얼 지연(16ms)을 1ms로 단축하여 실시간 1:1 추종 반응 속도를 극대화합니다.
@@ -72,6 +82,8 @@ ls /dev/ttyUSB*
 sudo chmod 666 /dev/ttyUSB0
 echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
 ```
+
+예를 들어 실제 장치가 `/dev/ttyUSB1`이면 위 두 명령의 `ttyUSB0`도 모두 `ttyUSB1`로 변경해야 합니다. `/dev/ttyACM0`처럼 `ttyACM` 장치인 경우에는 해당 장치에 `chmod`를 적용하고, `latency_timer` 파일이 없으면 저지연 설정 명령은 생략합니다.
 
 ---
 
