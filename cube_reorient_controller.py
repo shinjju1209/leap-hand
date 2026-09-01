@@ -206,6 +206,14 @@ class CubeReorientController:
         """Render the current scene to a BGR image, as the showcase does."""
         import cv2
 
+        if self._renderer is not None and (
+            self._renderer.height != height or self._renderer.width != width
+        ):
+            # A renderer is fixed to the size it was built at, so a different
+            # one asked for later came back silently at the old size.
+            self._renderer.close()
+            self._renderer = None
+
         if self._renderer is None:
             model = self.backend.model
             # The offscreen buffer is sized in the XML and defaults to 640x480;

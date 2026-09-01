@@ -95,6 +95,16 @@ class CubeReorientControllerTests(unittest.TestCase):
         image = self.controller.render_bgr(240, 320)
         self.assertEqual(image.shape, (240, 320, 3))
 
+    def test_a_second_size_is_honoured_rather_than_ignored(self) -> None:
+        """A renderer is fixed to the size it was built at.
+
+        Kept from the first call, it returned the old size for every later
+        request without saying so.
+        """
+        self.assertEqual(self.controller.render_bgr(480, 640).shape, (480, 640, 3))
+        self.assertEqual(self.controller.render_bgr(240, 320).shape, (240, 320, 3))
+        self.assertEqual(self.controller.render_bgr(480, 640).shape, (480, 640, 3))
+
     def test_pacing_follows_the_policy_rate_not_the_display(self) -> None:
         """step_if_due must refuse to run faster than the trained rate."""
         # Not the exact boundary: 100.0 + 0.05 - 100.0 is 0.04999... in binary
