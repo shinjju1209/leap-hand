@@ -24,6 +24,10 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from cube_reorient_controller import (
+    DEFAULT_POLICY_PATH as DEFAULT_REORIENT_POLICY_PATH,
+    CubeReorientController,
+)
 from hand_angles import (
     ANGLE_NAMES,
     calculate_leap_control_angles,
@@ -154,6 +158,7 @@ class AppScreen(Enum):
     TELEOP = auto()
     RPS = auto()
     SHOWCASE = auto()
+    REORIENT = auto()
 
 
 class RpsState(Enum):
@@ -272,6 +277,10 @@ class BoothKioskApp:
         max_tracking_error: float = 50.0,
         enable_mujoco: bool = True,
         enable_hardware: bool = False,
+        enable_reorient: bool = True,
+        reorient_policy_path: Path = DEFAULT_REORIENT_POLICY_PATH,
+        playground_root: Path | None = None,
+        reorient_tilt_degrees: float = 0.0,
         width: int = 1280,
         height: int = 720,
     ) -> None:
@@ -285,6 +294,10 @@ class BoothKioskApp:
         self.max_tracking_error = max_tracking_error
         self.enable_mujoco = enable_mujoco
         self.enable_hardware = enable_hardware
+        self.enable_reorient = enable_reorient
+        self.reorient_policy_path = reorient_policy_path
+        self.playground_root = playground_root
+        self.reorient_tilt_degrees = reorient_tilt_degrees
         self.width = width
         self.height = height
 
@@ -298,6 +311,9 @@ class BoothKioskApp:
         self.filter = OneEuroFilter()
         self.hardware_controller: LeapHandHardwareController | None = None
         self.mujoco_controller: MujocoHandController | None = None
+
+        # Cube Reorientation (RL policy, simulation only -- never the hand)
+        self.reorient_controller: CubeReorientController | None = None
 
         # Teleop State
         self.armed = False
@@ -336,23 +352,35 @@ class BoothKioskApp:
             AppScreen.TELEOP: [],
             AppScreen.RPS: [],
             AppScreen.SHOWCASE: [],
+            AppScreen.REORIENT: [],
         }
         self._init_buttons()
 
         # Connect hardware / MuJoCo if configured
         self._init_controllers()
 
+    def _home_card_layout(self) -> tuple[int, int, int, int, int]:
+        """Geometry of the home screen's mode cards: (w, h, gap, x0, y).
+
+        Both the buttons and the text drawn inside them come from here, so a
+        card cannot end up with its label in one place and its hit box in
+        another. Four cards is what makes this worth sharing -- the labels are
+        short because at this width the longer ones no longer fit.
+        """
+        card_w, card_h = 280, 380
+        gap = 30
+        columns = 4
+        start_x = (self.width - (columns * card_w + (columns - 1) * gap)) // 2
+        return card_w, card_h, gap, start_x, 180
+
     def _init_buttons(self) -> None:
         # HOME SCREEN BUTTONS
-        card_w, card_h = 360, 380
-        gap = 40
-        start_x = (self.width - (3 * card_w + 2 * gap)) // 2
-        y_pos = 180
+        card_w, card_h, gap, start_x, y_pos = self._home_card_layout()
 
         self.buttons[AppScreen.HOME] = [
             Button(
                 id="goto_teleop",
-                label="Teleoperation (1:1 Tracking)",
+                label="Teleoperation",
                 shortcut="1",
                 rect=(start_x, y_pos, card_w, card_h),
                 bg_color=(45, 35, 30),
@@ -360,7 +388,7 @@ class BoothKioskApp:
             ),
             Button(
                 id="goto_rps",
-                label="Rock-Paper-Scissors Game",
+                label="RPS Game",
                 shortcut="2",
                 rect=(start_x + card_w + gap, y_pos, card_w, card_h),
                 bg_color=(45, 35, 30),
@@ -371,6 +399,14 @@ class BoothKioskApp:
                 label="Gesture Showcase",
                 shortcut="3",
                 rect=(start_x + 2 * (card_w + gap), y_pos, card_w, card_h),
+                bg_color=(45, 35, 30),
+                hover_color=(75, 55, 40),
+            ),
+            Button(
+                id="goto_reorient",
+                label="Cube Reorient",
+                shortcut="4",
+                rect=(start_x + 3 * (card_w + gap), y_pos, card_w, card_h),
                 bg_color=(45, 35, 30),
                 hover_color=(75, 55, 40),
             ),
@@ -577,6 +613,99 @@ class BoothKioskApp:
             ),
         ]
 
+        # CUBE REORIENTATION SCREEN BUTTONS
+        # The goal is turned a quarter turn at a time about a world axis, so
+        # the six axis buttons sit in a 3x2 grid and everything else is a
+        # full-width row beneath them.
+        rx, ry, rw, rh = 880, 100, 370, 44
+        small_w = (rw - 2 * 8) // 3
+        row_gap = 54
+
+        def axis_button(column: int, row: int, name: str, shortcut: str) -> Button:
+            return Button(
+                id=f"reorient_goal_{name.lower()}",
+                label=name,
+                shortcut=shortcut,
+                rect=(rx + column * (small_w + 8), ry + row * (rh + 10), small_w, rh),
+                bg_color=(45, 35, 45),
+                hover_color=(70, 55, 70),
+                text_color=COLOR_ROBOT,
+            )
+
+        stack_y = ry + 2 * (rh + 10) + 16
+
+        def stacked(index: int, height: int = 44) -> tuple[int, int, int, int]:
+            return (rx, stack_y + index * row_gap, rw, height)
+
+        self.buttons[AppScreen.REORIENT] = [
+            axis_button(0, 0, "X+", "1"),
+            axis_button(1, 0, "Y+", "2"),
+            axis_button(2, 0, "Z+", "3"),
+            # 4/5/6 rather than Q/W/E: Q is the kiosk-wide quit key.
+            axis_button(0, 1, "X-", "4"),
+            axis_button(1, 1, "Y-", "5"),
+            axis_button(2, 1, "Z-", "6"),
+            Button(
+                id="reorient_random",
+                label="Random Goal",
+                shortcut="R",
+                rect=stacked(0),
+                bg_color=COLOR_CARD_BG,
+                hover_color=(60, 50, 45),
+            ),
+            Button(
+                id="reorient_reset_goal",
+                label="Reset Goal (Upright)",
+                shortcut="0",
+                rect=stacked(1),
+                bg_color=COLOR_CARD_BG,
+                hover_color=(60, 50, 45),
+            ),
+            Button(
+                id="reorient_adopt",
+                label="Goal = Cube Now",
+                shortcut="G",
+                rect=stacked(2),
+                bg_color=COLOR_CARD_BG,
+                hover_color=(60, 50, 45),
+            ),
+            Button(
+                id="reorient_auto",
+                label="Auto Goal: OFF",
+                shortcut="A",
+                rect=stacked(3),
+                bg_color=(30, 45, 55),
+                hover_color=(45, 65, 80),
+                text_color=COLOR_PRIMARY,
+            ),
+            Button(
+                id="reorient_pause",
+                label="Pause Policy",
+                shortcut="Space",
+                rect=stacked(4),
+                bg_color=(50, 45, 20),
+                hover_color=(75, 65, 30),
+                text_color=COLOR_WARNING,
+            ),
+            Button(
+                id="reorient_reset",
+                label="Reset Cube & Hand",
+                shortcut="X",
+                rect=stacked(5),
+                bg_color=(50, 25, 25),
+                hover_color=(80, 40, 40),
+                text_color=COLOR_DANGER,
+            ),
+            Button(
+                id="back_home_reorient",
+                label="Return to Main Menu (메인 메뉴)",
+                shortcut="H",
+                rect=stacked(6, 46),
+                bg_color=(40, 30, 25),
+                hover_color=(70, 50, 40),
+            ),
+        ]
+
     def _init_controllers(self) -> None:
         """Initialize Hardware and MuJoCo simulation backend controllers."""
         if self.enable_mujoco:
@@ -608,6 +737,20 @@ class BoothKioskApp:
                 print(f"[BOOTH WARN] Hardware connection skipped: {e}")
                 self.hardware_controller = None
 
+        if self.enable_reorient:
+            try:
+                self.reorient_controller = CubeReorientController(
+                    self.reorient_policy_path,
+                    playground_root=self.playground_root,
+                    tilt_degrees=self.reorient_tilt_degrees,
+                )
+                self.status_message = "Cube reorientation policy loaded."
+            except Exception as e:
+                # Missing policy or Playground checkout must not stop the booth:
+                # the other three modes have nothing to do with either.
+                print(f"[BOOTH WARN] Cube reorientation unavailable: {e}")
+                self.reorient_controller = None
+
     def send_robot_posture_degrees(self, posture_degrees: Sequence[float]) -> None:
         """Set target angles for smooth interpolation towards the target posture."""
         angles = np.asarray(posture_degrees, dtype=np.float64)
@@ -617,6 +760,13 @@ class BoothKioskApp:
         """Smoothly interpolate current joint angles for Showcase and RPS modes only."""
         if self.current_screen == AppScreen.TELEOP:
             # Teleoperation mode uses direct 1:1 instantaneous commands without showcase rate-limiting
+            return
+
+        if self.current_screen == AppScreen.REORIENT:
+            # The reorientation demo runs entirely in its own simulation. This
+            # function is the booth's only path to the hand, and it would keep
+            # commanding whichever posture the showcase left behind, so it stops
+            # here: nothing on that screen may reach a motor.
             return
 
         # Dynamic Animation Update for Showcase
@@ -674,6 +824,73 @@ class BoothKioskApp:
             except Exception as e:
                 print(f"[HARDWARE ERROR] Command failed: {e}")
 
+    @staticmethod
+    def _key_codes(*characters: str) -> tuple[int, ...]:
+        """Both cases of each character, so shortcuts work with caps lock on."""
+        codes = []
+        for character in characters:
+            codes.extend((ord(character.lower()), ord(character.upper())))
+        return tuple(dict.fromkeys(codes))
+
+    def _screen_key_bindings(self) -> list[tuple[tuple[int, ...], str]]:
+        """The keys the current screen answers to, paired with their action.
+
+        One table rather than a chain of comparisons in the run loop, so a
+        button's shortcut and the key that fires it stay together.
+        """
+        if self.current_screen == AppScreen.TELEOP:
+            return [
+                (self._key_codes("c"), "calib_open"),
+                (self._key_codes("f"), "calib_fist"),
+                (self._key_codes("a"), "toggle_arm"),
+                (self._key_codes("d", " "), "disarm"),
+                (self._key_codes("r"), "reset_calib"),
+            ]
+        if self.current_screen == AppScreen.RPS:
+            return [
+                (self._key_codes(" "), "rps_start"),
+                (self._key_codes("p"), "rps_auto_toggle"),
+                (self._key_codes("r"), "rps_reset_score"),
+            ]
+        if self.current_screen == AppScreen.SHOWCASE:
+            return [
+                (self._key_codes("1"), "showcase_rock"),
+                (self._key_codes("2"), "showcase_paper"),
+                (self._key_codes("3"), "showcase_scissors"),
+                (self._key_codes("4"), "showcase_neutral"),
+                (self._key_codes("5"), "showcase_middle"),
+                (self._key_codes("6"), "showcase_thumbs_up"),
+                (self._key_codes("7"), "showcase_ok"),
+                (self._key_codes("8"), "showcase_pointing"),
+                (self._key_codes("9"), "showcase_rock_on"),
+                (self._key_codes("w"), "showcase_finger_wave"),
+                (self._key_codes("v"), "showcase_wave_hello"),
+            ]
+        if self.current_screen == AppScreen.REORIENT:
+            return [
+                (self._key_codes("1"), "reorient_goal_x+"),
+                (self._key_codes("2"), "reorient_goal_y+"),
+                (self._key_codes("3"), "reorient_goal_z+"),
+                (self._key_codes("4"), "reorient_goal_x-"),
+                (self._key_codes("5"), "reorient_goal_y-"),
+                (self._key_codes("6"), "reorient_goal_z-"),
+                (self._key_codes("r"), "reorient_random"),
+                (self._key_codes("0"), "reorient_reset_goal"),
+                (self._key_codes("g"), "reorient_adopt"),
+                (self._key_codes("a"), "reorient_auto"),
+                (self._key_codes(" "), "reorient_pause"),
+                (self._key_codes("x"), "reorient_reset"),
+            ]
+        return []
+
+    def _handle_screen_key(self, key: int) -> bool:
+        """Fire the current screen's action for this key. True if it took it."""
+        for codes, action_id in self._screen_key_bindings():
+            if key in codes:
+                self.handle_action(action_id)
+                return True
+        return False
+
     def on_mouse_event(self, event: int, x: int, y: int, flags: int, param: Any) -> None:
         """Handle mouse movement and clicks."""
         self.mouse_pos = (x, y)
@@ -702,7 +919,25 @@ class BoothKioskApp:
             self.current_screen = AppScreen.SHOWCASE
             self.status_message = "Showcase: Click buttons to test postures."
             self.status_color = COLOR_SUCCESS
-        elif action_id in ("back_home_teleop", "back_home_rps", "back_home_showcase"):
+        elif action_id == "goto_reorient":
+            self.current_screen = AppScreen.REORIENT
+            if self.reorient_controller is None:
+                self.status_message = (
+                    "Cube reorientation is unavailable -- see the console for why."
+                )
+                self.status_color = COLOR_DANGER
+            else:
+                self.status_message = (
+                    "Cube Reorient: set a goal and watch the policy match it. "
+                    "Simulation only."
+                )
+                self.status_color = COLOR_ROBOT
+        elif action_id in (
+            "back_home_teleop",
+            "back_home_rps",
+            "back_home_showcase",
+            "back_home_reorient",
+        ):
             self.current_screen = AppScreen.HOME
             self.disarm_robot()
             self.status_message = "Main Menu. Select a mode to begin."
@@ -772,6 +1007,89 @@ class BoothKioskApp:
             self.play_showcase_animation("finger_wave", "Finger Wave (파도타기 애니메이션)")
         elif action_id == "showcase_wave_hello":
             self.play_showcase_animation("wave_hello", "Wave Hello (손 인사 애니메이션)")
+
+        # Cube Reorientation Actions (simulation only -- never the hand)
+        elif action_id.startswith("reorient_"):
+            self.handle_reorient_action(action_id)
+
+    def handle_reorient_action(self, action_id: str) -> None:
+        """Act on the cube reorientation screen. Touches the simulation only."""
+        controller = self.reorient_controller
+        if controller is None:
+            self.status_message = "Cube reorientation is not loaded."
+            self.status_color = COLOR_DANGER
+            return
+
+        if action_id.startswith("reorient_goal_"):
+            name = action_id.removeprefix("reorient_goal_")
+            axis = "xyz".index(name[0])
+            degrees = 90.0 if name[1] == "+" else -90.0
+            controller.rotate_goal(axis, degrees)
+            self.status_message = f"Goal turned {degrees:+.0f} deg about {name[0].upper()}."
+            self.status_color = COLOR_ROBOT
+        elif action_id == "reorient_random":
+            controller.randomize_goal()
+            self.status_message = "Random goal orientation set."
+            self.status_color = COLOR_ROBOT
+        elif action_id == "reorient_reset_goal":
+            controller.reset_goal()
+            self.status_message = "Goal reset to upright."
+            self.status_color = COLOR_ROBOT
+        elif action_id == "reorient_adopt":
+            controller.adopt_cube_goal()
+            self.status_message = "Goal set to the cube's current orientation."
+            self.status_color = COLOR_SUCCESS
+        elif action_id == "reorient_auto":
+            controller.toggle_auto_goal()
+            self._set_button_state(
+                AppScreen.REORIENT,
+                "reorient_auto",
+                label=f"Auto Goal: {'ON' if controller.auto_goal else 'OFF'}",
+                active=controller.auto_goal,
+            )
+            self.status_message = (
+                "Auto goal on: the training schedule spins the goal away on every "
+                "success."
+                if controller.auto_goal
+                else "Auto goal off: the goal stays where you put it."
+            )
+            self.status_color = COLOR_PRIMARY
+        elif action_id == "reorient_pause":
+            controller.toggle_pause()
+            self._set_button_state(
+                AppScreen.REORIENT,
+                "reorient_pause",
+                label="Resume Policy" if controller.paused else "Pause Policy",
+                active=controller.paused,
+            )
+            self.status_message = (
+                "Policy paused -- the cube keeps its pose."
+                if controller.paused
+                else "Policy running."
+            )
+            self.status_color = COLOR_WARNING if controller.paused else COLOR_SUCCESS
+        elif action_id == "reorient_reset":
+            controller.reset()
+            controller.reset_statistics()
+            self.status_message = "Cube and hand returned to the home pose."
+            self.status_color = COLOR_SUCCESS
+
+    def _set_button_state(
+        self,
+        screen: AppScreen,
+        button_id: str,
+        *,
+        label: str | None = None,
+        active: bool | None = None,
+    ) -> None:
+        """Update one button's caption or highlight after its state changed."""
+        for button in self.buttons.get(screen, []):
+            if button.id == button_id:
+                if label is not None:
+                    button.label = label
+                if active is not None:
+                    button.active = active
+                return
 
     def arm_robot(self) -> None:
         """Enable hardware torque and activate teleoperation tracking."""
@@ -971,9 +1289,17 @@ class BoothKioskApp:
             self._render_rps_screen(canvas, camera_frame, landmarks_list)
         elif self.current_screen == AppScreen.SHOWCASE:
             self._render_showcase_screen(canvas, camera_frame)
+        elif self.current_screen == AppScreen.REORIENT:
+            self._render_reorient_screen(canvas)
 
         for btn in self.buttons.get(self.current_screen, []):
             btn.draw(canvas, self.mouse_pos)
+
+        if self.current_screen == AppScreen.HOME:
+            # A mode card is a button filling its whole rectangle, so anything
+            # written inside one has to go on after it -- underneath, the fill
+            # paints it out and the card reads as empty.
+            self._render_home_card_text(canvas)
 
         self._draw_footer(canvas)
         return canvas
@@ -1034,36 +1360,61 @@ class BoothKioskApp:
             cv2.LINE_AA,
         )
 
-        card_w, card_h = 360, 380
-        gap = 40
-        start_x = (self.width - (3 * card_w + 2 * gap)) // 2
-        y_pos = 180
+    def _render_home_card_text(self, canvas: np.ndarray) -> None:
+        """Write each mode card's description over its button.
 
-        # Card 1
-        cv2.putText(canvas, "1:1 Live Hand Tracking", (start_x + 30, y_pos + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.65, COLOR_PRIMARY, 2, cv2.LINE_AA)
-        cv2.putText(canvas, "Replicate user hand motion", (start_x + 30, y_pos + 130), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "in real time across 16 joints.", (start_x + 30, y_pos + 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Open / Fist Calibration", (start_x + 30, y_pos + 210), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- OneEuro Jitter Filtering", (start_x + 30, y_pos + 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Real-time Arm / Disarm", (start_x + 30, y_pos + 270), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+        Called after the buttons are drawn, not with the rest of the home
+        screen: the card is the button, and a filled rectangle covers whatever
+        was underneath it. The button's own centred label acts as the card's
+        headline, so the blurb sits above it and the bullets below.
+        """
+        card_w, card_h, gap, start_x, y_pos = self._home_card_layout()
 
-        # Card 2
-        cx2 = start_x + card_w + gap
-        cv2.putText(canvas, "Rock-Paper-Scissors", (cx2 + 30, y_pos + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.65, COLOR_SECONDARY, 2, cv2.LINE_AA)
-        cv2.putText(canvas, "Battle the robot in real time!", (cx2 + 30, y_pos + 130), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "3-2-1 countdown & camera vision.", (cx2 + 30, y_pos + 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Auto Gesture Recognition", (cx2 + 30, y_pos + 210), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Real-time Winner Verdict", (cx2 + 30, y_pos + 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Live Booth Scoreboard", (cx2 + 30, y_pos + 270), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+        # Each card: a coloured title, two lines of what it is, three bullets.
+        cards = [
+            (
+                "Live Hand Tracking",
+                COLOR_PRIMARY,
+                ("Replicate user hand motion", "in real time, 16 joints."),
+                ("- Open / Fist Calibration",
+                 "- OneEuro Jitter Filtering",
+                 "- Real-time Arm / Disarm"),
+            ),
+            (
+                "Rock-Paper-Scissors",
+                COLOR_SECONDARY,
+                ("Battle the robot live!", "3-2-1 countdown & vision."),
+                ("- Auto Gesture Recognition",
+                 "- Real-time Winner Verdict",
+                 "- Live Booth Scoreboard"),
+            ),
+            (
+                "Showcase & Demos",
+                COLOR_SUCCESS,
+                ("One-click gesture demos", "and posture sanity checks."),
+                ("- Rock / Paper / Scissors",
+                 "- Middle Finger Extension",
+                 "- Hardware Limit Check"),
+            ),
+            (
+                "In-Hand Cube Reorient",
+                COLOR_ROBOT,
+                ("A trained RL policy turns", "the cube to match a goal."),
+                ("- MuJoCo Playground Policy",
+                 "- Simulation Only, No Hand",
+                 "- Set / Random / Auto Goal"),
+            ),
+        ]
 
-        # Card 3
-        cx3 = start_x + 2 * (card_w + gap)
-        cv2.putText(canvas, "Showcase & Demos", (cx3 + 30, y_pos + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.65, COLOR_SUCCESS, 2, cv2.LINE_AA)
-        cv2.putText(canvas, "One-click gesture demonstrations", (cx3 + 30, y_pos + 130), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "and posture sanity checks.", (cx3 + 30, y_pos + 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Rock / Paper / Scissors", (cx3 + 30, y_pos + 210), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Middle Finger Extension", (cx3 + 30, y_pos + 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
-        cv2.putText(canvas, "- Hardware Limit Check", (cx3 + 30, y_pos + 270), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+        # The button writes its label at the card's vertical centre, so the
+        # text is laid out around that rather than through it.
+        for index, (title, title_color, blurb, bullets) in enumerate(cards):
+            cx = start_x + index * (card_w + gap)
+            cv2.putText(canvas, title, (cx + 22, y_pos + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, title_color, 2, cv2.LINE_AA)
+            for line_index, line in enumerate(blurb):
+                cv2.putText(canvas, line, (cx + 22, y_pos + 110 + line_index * 28), cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
+            for line_index, line in enumerate(bullets):
+                cv2.putText(canvas, line, (cx + 22, y_pos + 255 + line_index * 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
 
     def _render_teleop_screen(
         self,
@@ -1277,6 +1628,81 @@ class BoothKioskApp:
             cv2.LINE_AA,
         )
 
+    def _render_reorient_screen(self, canvas: np.ndarray) -> None:
+        vw, vh = 800, 530
+        vx, vy = 40, 85
+        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BG, -1)
+        cv2.rectangle(canvas, (vx, vy), (vx + vw, vy + vh), COLOR_CARD_BORDER, 2)
+
+        controller = self.reorient_controller
+        sim_frame = None
+        if controller is not None:
+            try:
+                sim_frame = controller.render_bgr(480, 640)
+            except Exception:
+                sim_frame = None
+
+        if sim_frame is not None:
+            resized = cv2.resize(sim_frame, (vw - 8, vh - 8))
+            canvas[vy + 4 : vy + vh - 4, vx + 4 : vx + vw - 4] = resized
+        else:
+            cv2.putText(
+                canvas,
+                "Cube Reorientation Unavailable",
+                (vx + 200, vy + 270),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                COLOR_TEXT_MUTED,
+                2,
+                cv2.LINE_AA,
+            )
+            return
+
+        # The scene shows the goal cube on the left and the hand's cube on the
+        # right, so say which is which -- it is the whole point of the demo.
+        cv2.rectangle(canvas, (vx + 20, vy + 20), (vx + 250, vy + 55), (20, 20, 20), -1)
+        cv2.putText(canvas, "GOAL (target pose)", (vx + 32, vy + 44), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_ROBOT, 2, cv2.LINE_AA)
+        cv2.rectangle(canvas, (vx + vw - 260, vy + 20), (vx + vw - 20, vy + 55), (20, 20, 20), -1)
+        cv2.putText(canvas, "HAND (policy at work)", (vx + vw - 248, vy + 44), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_PRIMARY, 2, cv2.LINE_AA)
+
+        error_degrees = controller.goal_error_degrees
+        # Training counts a reorientation as solved at 0.1 rad, about 5.7 deg.
+        solved = error_degrees <= 5.73
+        error_color = COLOR_SUCCESS if solved else (
+            COLOR_WARNING if error_degrees < 45.0 else COLOR_DANGER
+        )
+
+        panel_w, panel_h = 300, 96
+        px = vx + (vw - panel_w) // 2
+        py = vy + vh - panel_h - 20
+        cv2.rectangle(canvas, (px, py), (px + panel_w, py + panel_h), (15, 15, 15), -1)
+        cv2.rectangle(canvas, (px, py), (px + panel_w, py + panel_h), error_color, 2)
+        cv2.putText(canvas, "ORIENTATION ERROR", (px + 55, py + 26), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{error_degrees:5.1f}", (px + 60, py + 78), cv2.FONT_HERSHEY_DUPLEX, 1.5, error_color, 2, cv2.LINE_AA)
+        cv2.putText(canvas, "deg", (px + 205, py + 78), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXT_MUTED, 2, cv2.LINE_AA)
+
+        if controller.paused:
+            cv2.putText(canvas, "PAUSED", (vx + vw // 2 - 70, vy + 100), cv2.FONT_HERSHEY_DUPLEX, 1.1, COLOR_WARNING, 2, cv2.LINE_AA)
+        elif solved:
+            cv2.putText(canvas, "SOLVED", (vx + vw // 2 - 70, vy + 100), cv2.FONT_HERSHEY_DUPLEX, 1.1, COLOR_SUCCESS, 2, cv2.LINE_AA)
+
+        # Telemetry goes in the strip between the last button and the footer.
+        # The buttons are drawn after this method returns, so anything placed
+        # over the button column is painted out.
+        tx, ty, strip_w = 880, 638, 370
+        cells = [
+            ("RATE", f"{1.0 / controller.dt:.0f} Hz"),
+            ("SOLVED", str(controller.successes)),
+            ("DROPS", str(controller.drops)),
+        ]
+        if controller.tilt_degrees:
+            cells.append(("TILT", f"{controller.tilt_degrees:.0f} deg"))
+        cell_w = strip_w // len(cells)
+        for index, (name, value) in enumerate(cells):
+            cx = tx + index * cell_w
+            cv2.putText(canvas, name, (cx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_TEXT_MUTED, 1, cv2.LINE_AA)
+            cv2.putText(canvas, value, (cx, ty + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT_MAIN, 2, cv2.LINE_AA)
+
     def run(self) -> int:
         """Main application loop."""
         print("\n" + "=" * 65)
@@ -1284,9 +1710,11 @@ class BoothKioskApp:
         print("=" * 65)
         print(f"  Mode: {self.mode.upper()} | Port: {self.port} | Profile: {self.profile}")
         print("  Controls:")
-        print("    [1] Teleoperation | [2] RPS Game | [3] Showcase | [H] Home")
+        print("    [1] Teleoperation | [2] RPS Game | [3] Showcase | [4] Cube Reorient")
         print("    [C] Open Calib    | [F] Fist Calib | [A] Arm     | [D] Disarm")
-        print("    [Space] RPS Start | [P] Auto Play  | [Q/ESC] Quit")
+        print("    [Space] RPS Start | [P] Auto Play  | [H] Home    | [Q/ESC] Quit")
+        print("    Cube Reorient: [1-3] goal +90 XYZ | [4-6] -90 | [R] random |")
+        print("                   [0] upright | [G] match cube | [A] auto | [X] reset")
         print("=" * 65 + "\n")
 
         cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
@@ -1318,6 +1746,15 @@ class BoothKioskApp:
                 # Smooth joint interpolation and physics stepping (Showcase and RPS only)
                 self.step_smooth_control(0.02)
 
+                # The reorientation policy runs at the rate it was trained at,
+                # which is slower than this loop redraws, so it is paced on its
+                # own clock rather than by holding the whole kiosk back.
+                if (
+                    self.current_screen == AppScreen.REORIENT
+                    and self.reorient_controller is not None
+                ):
+                    self.reorient_controller.step_if_due(time.monotonic())
+
                 canvas = self.render(display_frame, landmarks_list)
                 cv2.imshow(self.window_name, canvas)
 
@@ -1326,62 +1763,22 @@ class BoothKioskApp:
                     print("[BOOTH] Exit requested by user.")
                     break
 
-                # Global Navigation Keys
-                if key == ord("1"):
-                    self.handle_action("goto_teleop")
-                elif key == ord("2"):
-                    self.handle_action("goto_rps")
-                elif key == ord("3"):
-                    self.handle_action("goto_showcase")
-                elif key in (ord("h"), ord("H")):
-                    self.handle_action("back_home_teleop")
-
-                # Teleop Keys
-                elif self.current_screen == AppScreen.TELEOP:
-                    if key in (ord("c"), ord("C")):
-                        self.handle_action("calib_open")
-                    elif key in (ord("f"), ord("F")):
-                        self.handle_action("calib_fist")
-                    elif key in (ord("a"), ord("A")):
-                        self.handle_action("toggle_arm")
-                    elif key in (ord("d"), ord("D"), ord(" ")):
-                        self.handle_action("disarm")
-                    elif key in (ord("r"), ord("R")):
-                        self.handle_action("reset_calib")
-
-                # RPS Keys
-                elif self.current_screen == AppScreen.RPS:
-                    if key == ord(" "):
-                        self.handle_action("rps_start")
-                    elif key in (ord("p"), ord("P")):
-                        self.handle_action("rps_auto_toggle")
-                    elif key in (ord("r"), ord("R")):
-                        self.handle_action("rps_reset_score")
-
-                # Showcase Keys
-                elif self.current_screen == AppScreen.SHOWCASE:
+                # The current screen gets first refusal: a screen that prints a
+                # shortcut on one of its own buttons has to be the screen that
+                # receives it. Global navigation used to be tested first, so
+                # [1] [2] [3] on the showcase screen navigated away instead of
+                # playing the posture their buttons name.
+                if not self._handle_screen_key(key):
                     if key == ord("1"):
-                        self.handle_action("showcase_rock")
+                        self.handle_action("goto_teleop")
                     elif key == ord("2"):
-                        self.handle_action("showcase_paper")
+                        self.handle_action("goto_rps")
                     elif key == ord("3"):
-                        self.handle_action("showcase_scissors")
+                        self.handle_action("goto_showcase")
                     elif key == ord("4"):
-                        self.handle_action("showcase_neutral")
-                    elif key == ord("5"):
-                        self.handle_action("showcase_middle")
-                    elif key == ord("6"):
-                        self.handle_action("showcase_thumbs_up")
-                    elif key == ord("7"):
-                        self.handle_action("showcase_ok")
-                    elif key == ord("8"):
-                        self.handle_action("showcase_pointing")
-                    elif key == ord("9"):
-                        self.handle_action("showcase_rock_on")
-                    elif key in (ord("w"), ord("W")):
-                        self.handle_action("showcase_finger_wave")
-                    elif key in (ord("v"), ord("V")):
-                        self.handle_action("showcase_wave_hello")
+                        self.handle_action("goto_reorient")
+                    elif key in (ord("h"), ord("H")):
+                        self.handle_action("back_home_teleop")
 
         finally:
             if cap.isOpened():
@@ -1390,6 +1787,8 @@ class BoothKioskApp:
             self.disarm_robot()
             if self.hardware_controller is not None:
                 self.hardware_controller.disconnect()
+            if self.reorient_controller is not None:
+                self.reorient_controller.close()
             print("[BOOTH] Kiosk shutdown complete.")
 
         return 0
@@ -1449,6 +1848,38 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable physical hardware controller",
     )
+    parser.add_argument(
+        "--reorient-policy",
+        type=Path,
+        default=DEFAULT_REORIENT_POLICY_PATH,
+        help=(
+            "Path to the trained cube reorientation policy "
+            f"(default: {DEFAULT_REORIENT_POLICY_PATH})"
+        ),
+    )
+    parser.add_argument(
+        "--playground-root",
+        type=Path,
+        default=None,
+        help=(
+            "MuJoCo Playground checkout holding the reorientation scene "
+            "(default: importable package, else ~/Projects/mujoco_playground)"
+        ),
+    )
+    parser.add_argument(
+        "--reorient-tilt-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Tilt gravity in the reorientation simulation, to ask what a hand "
+            "mounted at a different angle would do (default: 0)"
+        ),
+    )
+    parser.add_argument(
+        "--no-reorient",
+        action="store_true",
+        help="Disable the cube reorientation screen",
+    )
     return parser.parse_args(argv)
 
 
@@ -1467,6 +1898,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         current_limit=args.current_limit,
         enable_mujoco=enable_mujoco,
         enable_hardware=enable_hardware,
+        enable_reorient=not args.no_reorient,
+        reorient_policy_path=args.reorient_policy,
+        playground_root=args.playground_root,
+        reorient_tilt_degrees=args.reorient_tilt_deg,
     )
     return app.run()
 
