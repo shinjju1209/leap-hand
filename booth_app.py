@@ -48,6 +48,7 @@ from webcam_hand_tracking import (
 DEFAULT_CALIB_PATH = Path("calibration/neutral_calibration.json")
 DEFAULT_MOTOR_CALIB_PATH = Path("calibration/hardware_motors.yaml")
 DEFAULT_MODEL_PATH = Path("models/hand_landmarker.task")
+DEFAULT_LOGO_PATH = Path("assets/shape_mark.png")
 
 # Colours in BGR, taken from the SHAPE site (snu-shape.com): a light ground,
 # one blue that carries the brand, and a crimson for the things that need to
@@ -332,6 +333,40 @@ def badge(
     return w
 
 
+def load_logo(path: Path, height: int) -> np.ndarray | None:
+    """Read the brand mark and scale it to a header height.
+
+    The file is a dark mark on a white artboard rather than a cut-out, so it is
+    composited by multiplication below rather than masked: white goes to
+    nothing, the mark keeps its gradient. Returns None if the file is missing,
+    since a booth with no logo should still open.
+    """
+    if not path.is_file():
+        return None
+    image = cv2.imread(str(path))
+    if image is None:
+        return None
+    width = max(1, round(image.shape[1] * height / image.shape[0]))
+    return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+
+
+def draw_logo(canvas: np.ndarray, logo: np.ndarray, origin: tuple[int, int]) -> int:
+    """Multiply the mark onto the canvas. Returns the width it used.
+
+    Multiplication is what lets a mark on a white artboard sit on a white
+    header without a rectangle around it: white (1.0) leaves the ground alone
+    and the mark darkens it exactly as much as it is dark.
+    """
+    x, y = origin
+    h, w = logo.shape[:2]
+    if y + h > canvas.shape[0] or x + w > canvas.shape[1]:
+        return 0
+    region = canvas[y:y + h, x:x + w].astype(np.float32)
+    blended = region * (logo.astype(np.float32) / 255.0)
+    canvas[y:y + h, x:x + w] = blended.astype(np.uint8)
+    return w
+
+
 VIEWPORT = (40, 85, 800, 530)   # where a screen's main image goes
 
 
@@ -528,6 +563,7 @@ class BoothKioskApp:
         calib_path: Path = DEFAULT_CALIB_PATH,
         motor_calib_path: Path = DEFAULT_MOTOR_CALIB_PATH,
         model_path: Path = DEFAULT_MODEL_PATH,
+        logo_path: Path = DEFAULT_LOGO_PATH,
         camera_id: int = 0,
         current_limit: int = 350,
         max_joint_speed: float = 350.0,
@@ -559,6 +595,7 @@ class BoothKioskApp:
         self.height = height
 
         self.current_screen = AppScreen.HOME
+        self.logo = load_logo(logo_path, 38)
         self.mouse_pos = (0, 0)
         self.window_name = "LEAP Hand Interactive Booth Kiosk"
 
@@ -1573,17 +1610,15 @@ class BoothKioskApp:
         cv2.rectangle(canvas, (0, 0), (self.width, 65), COLOR_CARD_BG, -1)
         cv2.line(canvas, (0, 65), (self.width, 65), COLOR_CARD_BORDER, 1, cv2.LINE_AA)
 
-        # A square of brand blue standing in for the mark, then the wordmark.
-        rounded_rect(canvas, (25, 20, 26, 26), COLOR_PRIMARY, 7, -1)
-        cv2.putText(canvas, "S", (33, 39), cv2.FONT_HERSHEY_DUPLEX, 0.6,
-                    (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.putText(canvas, "LEAP HAND BOOTH", (62, 41), cv2.FONT_HERSHEY_DUPLEX,
+        x = 25
+        if self.logo is not None:
+            x += draw_logo(canvas, self.logo, (x, 13)) + 14
+        cv2.putText(canvas, "LEAP HAND BOOTH", (x, 41), cv2.FONT_HERSHEY_DUPLEX,
                     0.72, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
 
         # Status pills, laid out left to right so none of them collide.
         x = 330
         x += badge(canvas, (x, 19), f"MODE  {self.mode.upper()}", COLOR_PRIMARY) + 10
-        x += badge(canvas, (x, 19), f"PROFILE  {self.profile}", COLOR_SECONDARY) + 10
         badge(canvas, (x, 19), f"{self.fps:.0f} FPS", COLOR_TEXT_MUTED)
 
     def _draw_footer(self, canvas: np.ndarray) -> None:

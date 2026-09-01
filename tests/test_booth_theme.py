@@ -16,6 +16,7 @@ import numpy as np
 
 import booth_app
 from booth_app import (
+    DEFAULT_LOGO_PATH,
     COLOR_BG,
     COLOR_CARD_BG,
     COLOR_CARD_BORDER,
@@ -29,6 +30,8 @@ from booth_app import (
     Button,
     badge,
     card,
+    draw_logo,
+    load_logo,
     pill_rect,
     rounded_rect,
     soft_shadow,
@@ -148,6 +151,48 @@ class DrawingPrimitiveTests(unittest.TestCase):
         frame[:, :] = (255, 0, 0)
         viewport(canvas, (20, 20, 260, 150), frame)
         self.assertTrue((canvas[95, 150] == (255, 0, 0)).all(), "the frame was not drawn")
+
+
+class LogoTests(unittest.TestCase):
+    """The mark is a dark logo on a white artboard, not a cut-out."""
+
+    def test_the_mark_ships_with_the_repo(self) -> None:
+        self.assertTrue(DEFAULT_LOGO_PATH.is_file(),
+                        f"the brand mark is missing at {DEFAULT_LOGO_PATH}")
+
+    def test_it_is_scaled_to_the_height_asked_for(self) -> None:
+        logo = load_logo(DEFAULT_LOGO_PATH, 38)
+        self.assertIsNotNone(logo)
+        self.assertEqual(logo.shape[0], 38)
+        self.assertGreater(logo.shape[1], 0, "the aspect ratio collapsed")
+
+    def test_a_missing_file_is_not_fatal(self) -> None:
+        """A booth with no logo still has to open."""
+        self.assertIsNone(load_logo(booth_app.Path("no/such/logo.png"), 38))
+
+    def test_the_white_artboard_does_not_paint_a_box(self) -> None:
+        """Multiplication is what keeps the mark from arriving in a rectangle.
+
+        The file has no alpha channel, so a straight blit would stamp a white
+        square onto the header. White multiplies to 1.0 and leaves the ground
+        untouched; only the mark itself darkens anything.
+        """
+        canvas = np.full((80, 300, 3), 247, np.uint8)
+        logo = load_logo(DEFAULT_LOGO_PATH, 38)
+        used = draw_logo(canvas, logo, (20, 20))
+        self.assertGreater(used, 0)
+        # A corner of the logo's own box: artboard, so the ground survives.
+        self.assertTrue((canvas[21, 21] == 247).all(),
+                        "the artboard was stamped onto the header")
+        # Somewhere inside the mark, the canvas got darker.
+        patch_region = canvas[20:58, 20:20 + used]
+        self.assertLess(patch_region.min(), 200, "the mark did not draw")
+
+    def test_it_declines_to_draw_off_the_canvas(self) -> None:
+        canvas = np.full((80, 300, 3), 247, np.uint8)
+        logo = load_logo(DEFAULT_LOGO_PATH, 38)
+        self.assertEqual(draw_logo(canvas, logo, (290, 70)), 0)
+        self.assertTrue((canvas == 247).all(), "it drew anyway")
 
 
 class ButtonAppearanceTests(unittest.TestCase):
